@@ -32,13 +32,34 @@ android {
         // versionName numeric-only — UpdateCheck.isNewer parses digits.
         //   8.2.3 / 262 — first Choop release (rebrand + own key).
         //   8.2.4 / 263 — in-app "NOOP" wordmarks/copy → "Choop"; versioned APK filename.
-        versionCode = 263
-        versionName = "8.2.4"
+        versionCode = 267
+        versionName = "8.2.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // Build provenance for the Today-header stamp (see ui/BuildStamp.kt). CI injects the short
+        // sha + branch via -PchoopGitSha/-PchoopGitBranch; local builds leave them blank and the UI
+        // omits the segment. Kept in defaultConfig so every flavor carries the fields.
+        val gitSha = (project.findProperty("choopGitSha") as String?) ?: ""
+        val gitBranch = (project.findProperty("choopGitBranch") as String?) ?: ""
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")
+    }
+
+    // CI-only version override, used by the release workflow for PREVIEW-CHANNEL builds: it passes
+    // -PchoopVersionCodeOverride=1000+<run#> so every newer CI preview build carries a strictly
+    // higher versionCode than any earlier one — REGARDLESS of which branch it was built from. That
+    // is what lets you install a preview APK cut from a feature branch over an installed "Choop
+    // Preview" without Android's downgrade block, even when the branch's own versionName/-Code lag
+    // behind main. Local builds and the stable channel never set these properties and are untouched.
+    (project.findProperty("choopVersionCodeOverride") as String?)?.toIntOrNull()?.let {
+        defaultConfig.versionCode = it
+    }
+    (project.findProperty("choopVersionNameOverride") as String?)?.let {
+        defaultConfig.versionName = it
     }
 
     signingConfigs {
@@ -78,17 +99,26 @@ android {
         }
     }
 
-    // Two clearly-distinct apps that install side-by-side:
-    //   • full → "Choop"      (com.kimchai.choop)      — the real app, starts empty, pair a strap / import.
-    //   • demo → "Choop Demo"  (com.kimchai.choop.demo) — preloaded with 120 days of synthetic data and
-    //                          a visible DEMO badge, so anyone can explore every screen with no strap.
-    // Build e.g. ./gradlew assembleFullRelease assembleDemoRelease.
+    // Three clearly-distinct apps that install side-by-side:
+    //   • full    → "Choop"         (com.kimchai.choop)         — the real app, starts empty; pair a strap / import.
+    //   • demo    → "Choop Demo"    (com.kimchai.choop.demo)    — preloaded with 120 days of synthetic data and
+    //                                a visible DEMO badge, so anyone can explore every screen with no strap.
+    //   • preview → "Choop Preview" (com.kimchai.choop.preview) — the PREVIEW CHANNEL: functionally the
+    //                                full app (same TIER), own sandbox, updated from GitHub *pre*-releases
+    //                                (see UpdateCheck + BuildConfig.CHANNEL). Lets a stable Choop and a
+    //                                features-ahead Choop coexist, Edge-Canary style. Same signing key as
+    //                                stable — the separate applicationId is what keeps them apart.
+    //                                NOTE: the strap should stay paired to STABLE — history offload is
+    //                                consume-on-read, so whichever app syncs a slice owns it. Feed Preview
+    //                                with a .noopbak import instead (see MIGRATION.md).
+    // Build e.g. ./gradlew assembleFullRelease assembleDemoRelease assemblePreviewRelease.
     flavorDimensions += "tier"
     productFlavors {
         create("full") {
             dimension = "tier"
             buildConfigField("String", "TIER", "\"full\"")
             buildConfigField("boolean", "ENABLE_DEMO", "false")
+            buildConfigField("String", "CHANNEL", "\"stable\"")
         }
         create("demo") {
             dimension = "tier"
@@ -96,6 +126,16 @@ android {
             versionNameSuffix = "-demo"
             buildConfigField("String", "TIER", "\"demo\"")
             buildConfigField("boolean", "ENABLE_DEMO", "true")
+            buildConfigField("String", "CHANNEL", "\"stable\"")
+        }
+        create("preview") {
+            dimension = "tier"
+            applicationIdSuffix = ".preview"
+            versionNameSuffix = "-preview"
+            // Functionally the full app — only the channel differs.
+            buildConfigField("String", "TIER", "\"full\"")
+            buildConfigField("boolean", "ENABLE_DEMO", "false")
+            buildConfigField("String", "CHANNEL", "\"preview\"")
         }
     }
 
