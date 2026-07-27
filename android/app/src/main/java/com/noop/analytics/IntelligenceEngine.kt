@@ -347,7 +347,10 @@ object IntelligenceEngine {
         // (SleepStager + AnalyticsEngine), so we harvest them to SEED the baseline and
         // re-score in pass 2. Collected oldest-first to match foldHistory's replay order.
         // foldHistory winsorizes outliers. days() is oldest-first (Swift ascending).
-        val hist = repo.days(importedDeviceId)
+        // IDENTITY FUSION: union the canonical lineage in, so a strap made active under its REAL id still
+        // folds its pre-switch imported history into the baseline instead of restarting from the handful of
+        // post-switch nights. Single-WHOOP install ⇒ one id ⇒ byte-identical to the old repo.days() read.
+        val hist = repo.daysUnion(importedDeviceId)
         // CAPTURE-B: per-day resolved read owner + HR-row count, captured in pass 1, consumed by pass 2's
         // universal dayOwner emit (which reuses the SAME importedWhoopDays / appleHealthDays sets pass 2
         // builds for daySourceToken, so there is no extra read). Only populated when the universal sink is

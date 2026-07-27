@@ -833,6 +833,22 @@ class WhoopRepository(private val dao: WhoopDao) {
     suspend fun days(deviceId: String): List<DailyMetric> = dao.days(deviceId)
 
     /**
+     * All cached daily metrics over the read-side UNION of the active strap id AND the canonical
+     * "my-whoop" (SPINE / #814), active-first so the active lineage wins a day both cover. The suspend
+     * twin of [daysMergedFlow]'s imported leg, for the [com.noop.analytics.IntelligenceEngine] pass-1
+     * baseline fold: a strap made active under its REAL id leaves the whole earlier imported history
+     * anchored on the canonical id, and a single-id read folded a baseline from only the post-switch
+     * nights. Single-WHOOP install resolves to ONE id ⇒ `days()` verbatim ⇒ byte-identical.
+     * Oldest-first ordering is preserved (both legs are oldest-first and [unionByDay] keeps insertion
+     * order, so the union is re-sorted here to stay monotonic across the seam).
+     */
+    suspend fun daysUnion(activeDeviceId: String): List<DailyMetric> {
+        val ids = importedSourceIds(activeDeviceId)
+        if (ids.size == 1) return dao.days(ids[0])
+        return unionByDay(ids.map { dao.days(it) }).sortedBy { it.day }
+    }
+
+    /**
      * One-time #34 refile: move legacy Health Connect data out of the shared "apple-health" bucket into
      * its own "health-connect" source, so it stops being shown as Apple Health. HC workouts are tagged
      * `source = "health-connect"` so they move unconditionally; the daily aggregates only move when there
