@@ -90,6 +90,31 @@ class ResolverUnionTest {
         )
     }
 
+    /**
+     * GUARD RAIL (regression, preview 8.2.28): the active strap id belongs in [strapDeviceId], NEVER in
+     * [preferredSource]. The WHOOP branch is entered only when `preferredSource == WHOOP_SOURCE ||
+     * preferredSource == strapDeviceId`; a caller that puts a REAL strap id in the preferred slot while
+     * [strapDeviceId] keeps its "my-whoop" default satisfies neither, drops through to the
+     * "any other source → itself only" fallback, and resolves ONE bare id that holds no rows at all —
+     * silently killing Rest, the per-metric provenance badge and the steps estimate at once.
+     *
+     * This pins BOTH sides so the failure can't come back unnoticed: the wrong call really does collapse,
+     * and the right call really does union. Call sites use the named argument for exactly this reason.
+     */
+    @Test
+    fun realStrapIdInThePreferredSlotCollapsesTheUnion() {
+        // WRONG: real id as preferredSource, strapDeviceId left at its canonical default.
+        assertEquals(
+            listOf(reAdded),
+            WhoopRepository.sourceCandidates("sleep_performance", reAdded, canonical).map { it.source },
+        )
+        // RIGHT: canonical preferred, real id threaded as the strap — the full union resolves.
+        assertEquals(
+            listOf(reAdded, "$reAdded-noop", "my-whoop", "my-whoop-noop"),
+            WhoopRepository.sourceCandidates("sleep_performance", canonical, reAdded).map { it.source },
+        )
+    }
+
     // --- dedupSleepBlocks: the sleep-block union's exact-twin drop ---
 
     private fun block(source: String, start: Long, end: Long) =

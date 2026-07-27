@@ -688,8 +688,14 @@ fun TodayScreen(
     var stepsEstForDay by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(days, selectedDayKey) {
         val byDay = runCatching {
-            // IDENTITY FUSION: active strap id, so estimated steps span a "Make active" seam.
-            viewModel.repo.resolvedSeries("steps_est", viewModel.activeStrapId, "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: the active strap id belongs in [strapDeviceId], NOT preferredSource —
+            // sourceCandidates only takes its WHOOP branch when preferredSource is the canonical id (or
+            // equals strapDeviceId), and a real id in the preferred slot collapses the candidate list to
+            // that bare id alone, which holds no rows at all. Named argument on purpose.
+            viewModel.repo.resolvedSeries(
+                "steps_est", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         stepsEstForDay = byDay[selectedDayKey]?.let { Math.round(it).toInt() }
@@ -725,10 +731,14 @@ fun TodayScreen(
     var restScoreForDay by remember { mutableStateOf<Double?>(null) }
     LaunchedEffect(days, selectedDayKey, selectedDayOffset) {
         val byDay = runCatching {
-            // IDENTITY FUSION: pass the ACTIVE strap id, not a hardcoded "my-whoop". sourceCandidates
-            // unions the canonical pair in, so this resolves [active, active-noop, my-whoop, my-whoop-noop]
-            // and Rest keeps rendering across a "Make active" seam. Single-WHOOP ⇒ same two candidates.
-            viewModel.repo.resolvedSeries("sleep_performance", viewModel.activeStrapId, "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: the active strap id goes in [strapDeviceId] (5th), preferredSource stays
+            // canonical — that is what makes sourceCandidates build the full union
+            // [active, active-noop, my-whoop, my-whoop-noop], so Rest renders across a "Make active" seam.
+            // Passing the real id as preferredSource instead collapses the list to that bare id (no rows).
+            viewModel.repo.resolvedSeries(
+                "sleep_performance", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         // #977: the tail-fallback (latest scored night) is now freshness-gated. A live 5.0 whose sleep never
@@ -750,9 +760,12 @@ fun TodayScreen(
     var restCompositeSpark by remember { mutableStateOf<List<Double>>(emptyList()) }
     LaunchedEffect(days, selectedDay) {
         val byDay = runCatching {
-            // IDENTITY FUSION: active strap id (see the Rest-score read above) so the 14-day sparkline
-            // spans a "Make active" seam instead of flat-lining at it.
-            viewModel.repo.resolvedSeries("sleep_performance", viewModel.activeStrapId, "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: active strap id in [strapDeviceId] (see the Rest-score read above) so the
+            // 14-day sparkline spans a "Make active" seam instead of flat-lining at it.
+            viewModel.repo.resolvedSeries(
+                "sleep_performance", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         val cutoff = selectedDay.minusDays(13).toString()
@@ -775,10 +788,12 @@ fun TodayScreen(
         val resolved = mutableMapOf<String, String>()
         for (key in listOf("recovery", "sleep_performance")) {
             val win = runCatching {
-                // IDENTITY FUSION: active strap id, so the badge names the lineage that actually supplied
-                // the day rather than resolving only the canonical pair.
-                viewModel.repo.resolvedSeries(key, viewModel.activeStrapId, "0000-00-00", "9999-99-99")
-                    .points.lastOrNull { it.day == selectedDayKey }?.source
+                // IDENTITY FUSION: active strap id in [strapDeviceId], so the badge names the lineage that
+                // actually supplied the day rather than resolving only the canonical pair.
+                viewModel.repo.resolvedSeries(
+                    key, WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                    strapDeviceId = viewModel.activeStrapId,
+                ).points.lastOrNull { it.day == selectedDayKey }?.source
             }.getOrNull()
             if (win != null) resolved[key] = win
         }
