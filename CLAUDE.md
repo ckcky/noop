@@ -21,7 +21,11 @@ Do not skip step 3. **Previews come from branches; stable comes from `main`; `ma
 
 ## Build / test notes
 
-- A full Gradle build does **not** run in the Claude Code sandbox — the Android Gradle Plugin can't be fetched through the agent proxy. **The release workflow's `build-and-test` job is the compile + unit-test gate**; rely on a green CI run, not a local build. (Kotlin logic can still be reviewed and reasoned about locally, and pure functions verified by hand.)
+- A full Gradle build does **not** run in the Claude Code sandbox — the Android Gradle Plugin can't be fetched through the agent proxy. Rely on a green CI run, not a local build. (Kotlin logic can still be reviewed and reasoned about locally, and pure functions verified by hand.)
+- **Two different workflows — dispatch BOTH, they are not interchangeable:**
+  - `.github/workflows/android.yml` → job `build-and-test` → `./gradlew testFullDebugUnitTest`. **This is the only unit-test gate.** It is also the only thing that COMPILES the test sourceset, so new/changed tests are unverified until this is green.
+  - `.github/workflows/android-release.yml` → single job `release-apk` → `assembleFullRelease`. Compiles main code and produces the installable APK, but runs **no** tests and never compiles `src/test`. A green run here says nothing about tests.
+- `android-release.yml` derives the channel from the branch and **rejects release modes on a branch** — from a feature branch the only valid `mode` is `apk-only`, which hands back a `Choop-Preview-v*.apk` artifact to sideload (no tag, no GitHub Release).
 - After a `.noopbak` import the app clears its analyze watermark and runs a **full background rescore** (sleep staging + recovery/strain scoring over ~3 weeks of 1 Hz data). Dashboard tiles can take **1–2 minutes** to populate after the mandated restart — this is a one-time cost, not a hang.
 
 ## Diagnose before shipping

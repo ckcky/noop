@@ -424,12 +424,16 @@ fun TodayScreen(
                 .associate { it.day to it.value.coerceIn(0.0, 3.0) }
             StressModel.build(days, stored)?.score
         }.getOrNull()
-        fitnessAgeToday = runCatching {
-            viewModel.repo.metricSeries("my-whoop-noop", "fitness_age", "0000-01-01", "9999-12-31").lastOrNull()?.value
-        }.getOrNull()
-        vitalityToday = runCatching {
-            viewModel.repo.metricSeries("my-whoop-noop", "vitality", "0000-01-01", "9999-12-31").lastOrNull()?.value
-        }.getOrNull()
+        // IDENTITY FUSION: Fitness Age / Vitality live ONLY under the engine's computed namespace, which
+        // splits in two after a "Make active" onto a strap's real id. Read every computed lineage and take
+        // the newest point by day, so the weekly score doesn't vanish (or freeze at the pre-switch value)
+        // the moment the engine starts writing under the new id. Single-WHOOP ⇒ one id ⇒ unchanged read.
+        suspend fun latestComputed(key: String): Double? =
+            WhoopRepository.computedSourceIdsFor(viewModel.activeStrapId)
+                .flatMap { viewModel.repo.metricSeries(it, key, "0000-01-01", "9999-12-31") }
+                .maxByOrNull { it.day }?.value
+        fitnessAgeToday = runCatching { latestComputed("fitness_age") }.getOrNull()
+        vitalityToday = runCatching { latestComputed("vitality") }.getOrNull()
         // Cache the computed triple + signature so a later re-mount with unchanged data restores them and
         // short-circuits the history-wide read above.
         viewModel.todayStressCache = stressToday
@@ -684,7 +688,14 @@ fun TodayScreen(
     var stepsEstForDay by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(days, selectedDayKey) {
         val byDay = runCatching {
-            viewModel.repo.resolvedSeries("steps_est", "my-whoop", "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: the active strap id belongs in [strapDeviceId], NOT preferredSource —
+            // sourceCandidates only takes its WHOOP branch when preferredSource is the canonical id (or
+            // equals strapDeviceId), and a real id in the preferred slot collapses the candidate list to
+            // that bare id alone, which holds no rows at all. Named argument on purpose.
+            viewModel.repo.resolvedSeries(
+                "steps_est", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         stepsEstForDay = byDay[selectedDayKey]?.let { Math.round(it).toInt() }
@@ -720,7 +731,14 @@ fun TodayScreen(
     var restScoreForDay by remember { mutableStateOf<Double?>(null) }
     LaunchedEffect(days, selectedDayKey, selectedDayOffset) {
         val byDay = runCatching {
-            viewModel.repo.resolvedSeries("sleep_performance", "my-whoop", "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: the active strap id goes in [strapDeviceId] (5th), preferredSource stays
+            // canonical — that is what makes sourceCandidates build the full union
+            // [active, active-noop, my-whoop, my-whoop-noop], so Rest renders across a "Make active" seam.
+            // Passing the real id as preferredSource instead collapses the list to that bare id (no rows).
+            viewModel.repo.resolvedSeries(
+                "sleep_performance", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         // #977: the tail-fallback (latest scored night) is now freshness-gated. A live 5.0 whose sleep never
@@ -742,7 +760,12 @@ fun TodayScreen(
     var restCompositeSpark by remember { mutableStateOf<List<Double>>(emptyList()) }
     LaunchedEffect(days, selectedDay) {
         val byDay = runCatching {
-            viewModel.repo.resolvedSeries("sleep_performance", "my-whoop", "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: active strap id in [strapDeviceId] (see the Rest-score read above) so the
+            // 14-day sparkline spans a "Make active" seam instead of flat-lining at it.
+            viewModel.repo.resolvedSeries(
+                "sleep_performance", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         val cutoff = selectedDay.minusDays(13).toString()
@@ -765,8 +788,12 @@ fun TodayScreen(
         val resolved = mutableMapOf<String, String>()
         for (key in listOf("recovery", "sleep_performance")) {
             val win = runCatching {
-                viewModel.repo.resolvedSeries(key, "my-whoop", "0000-00-00", "9999-99-99")
-                    .points.lastOrNull { it.day == selectedDayKey }?.source
+                // IDENTITY FUSION: active strap id in [strapDeviceId], so the badge names the lineage that
+                // actually supplied the day rather than resolving only the canonical pair.
+                viewModel.repo.resolvedSeries(
+                    key, WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                    strapDeviceId = viewModel.activeStrapId,
+                ).points.lastOrNull { it.day == selectedDayKey }?.source
             }.getOrNull()
             if (win != null) resolved[key] = win
         }
@@ -888,10 +915,14 @@ fun TodayScreen(
     // ring having a value (a calibrating / empty ring shows no badge). Null → no badge. Mirrors the Swift
     // Today lane (per-ring SourceBadge from provenanceByMetric, gated by ringHasValue).
     val chargeProvenance = remember(provenanceByMetric, displayMetric) {
-        if (displayMetric?.recovery != null) provenanceByMetric["recovery"]?.let { provenanceDisplayLabel(it) } else null
+        if (displayMetric?.recovery != null) {
+            provenanceByMetric["recovery"]?.let { provenanceDisplayLabel(it, viewModel.activeStrapId) }
+        } else null
     }
     val restProvenance = remember(provenanceByMetric, restScoreForDay) {
-        if (restScoreForDay != null) provenanceByMetric["sleep_performance"]?.let { provenanceDisplayLabel(it) } else null
+        if (restScoreForDay != null) {
+            provenanceByMetric["sleep_performance"]?.let { provenanceDisplayLabel(it, viewModel.activeStrapId) }
+        } else null
     }
 
     // 14-day trailing calendar window ending on the phone's actual local day.
@@ -4193,7 +4224,12 @@ internal fun provenanceDisplayLabel(
     rawSource: String,
     deviceId: String = WhoopRepository.WHOOP_SOURCE,
 ): String {
-    if (rawSource == "$deviceId-noop") return "On-device"
+    // IDENTITY FUSION: ANY "<id>-noop" is a Choop-computed strap sibling, not just the active id's own.
+    // After a "Make active" onto a strap's REAL id the two lineages ("my-whoop-noop" and
+    // "whoop-<mac>-noop") both supply days, and the exact-match test labelled the non-active one with the
+    // grey "Whoop" fallback — claiming an import that never happened. The "-noop" suffix is the engine's
+    // private write namespace (nothing else in the store ends in it), so the suffix test is exact enough.
+    if (rawSource.endsWith("-noop")) return "On-device"
     if (rawSource == deviceId || rawSource == WhoopRepository.WHOOP_SOURCE) return "Whoop"
     if (rawSource == WhoopRepository.APPLE_HEALTH_SOURCE) return "Apple Health"
     // Fall back to the FusionSource display name for any other known source; else the raw id verbatim.

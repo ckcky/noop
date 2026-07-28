@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsRun
@@ -160,6 +161,12 @@ fun DevicesScreen(
                 // Firmware version from the connect handshake: only for the active, connected strap.
                 liveFirmware = if (device.status == DeviceStatus.active.name && live.connected)
                     live.strapFirmware else null,
+                // When this is the ONLY band, "Make active" is a footgun with no upside: a lone band
+                // already owns every day via the default owner, and activating a band whose id isn't the
+                // canonical "my-whoop" hands new days to that band's own id — which the app's read spine
+                // (keyed to "my-whoop", the #1008 union that was never wired in) doesn't follow, silently
+                // splitting recent days off. So we block it with an inline note rather than offer it.
+                soleStrap = activeDevices.size == 1,
                 onMakeActive = { switchTarget = device },
                 onRename = { renameTarget = device },
                 onRemove = { removeTarget = device },
@@ -297,6 +304,10 @@ private fun DeviceCard(
     /** The active+connected strap's firmware version (from the connect handshake). null when not
      *  active/connected, or for a source that reports no firmware (e.g. a non-WHOOP strap). */
     liveFirmware: String? = null,
+    /** True when this is the ONLY non-archived band. Gates "Make active" off (see the call site): a lone
+     *  band already owns every day, and activating a non-canonical band splits recent days off the read
+     *  spine. Ignored for the archived/re-add path. */
+    soleStrap: Boolean = false,
     onMakeActive: () -> Unit,
     onRename: () -> Unit,
     onRemove: (() -> Unit)?,
@@ -391,6 +402,7 @@ private fun DeviceCard(
                 DeviceActionsMenu(
                     device = device,
                     isActive = isActive,
+                    soleStrap = soleStrap,
                     open = menuOpen,
                     onOpenChange = { menuOpen = it },
                     onMakeActive = onMakeActive,
@@ -467,6 +479,8 @@ private fun StatePill(device: PairedDeviceRow, isActive: Boolean, isLiveConnecte
 private fun DeviceActionsMenu(
     device: PairedDeviceRow,
     isActive: Boolean,
+    // True when this is the only non-archived band → "Make active" is shown disabled with a note.
+    soleStrap: Boolean = false,
     // Open state is hoisted to the DeviceCard so the whole card (not just this ⋮ button) can open the menu.
     open: Boolean,
     onOpenChange: (Boolean) -> Unit,
@@ -499,7 +513,28 @@ private fun DeviceActionsMenu(
                 }
             } else {
                 if (!isActive) {
-                    MenuItem("Make active", Icons.Filled.Bolt) { onOpenChange(false); onMakeActive() }
+                    if (soleStrap) {
+                        // Only band paired → activating it is a footgun with no upside (see DeviceCard's
+                        // call site). Show the action disabled with an inline note instead of offering it.
+                        DropdownMenuItem(
+                            enabled = false,
+                            text = { Text("Make active", style = NoopType.body, color = Palette.textTertiary) },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Bolt, contentDescription = null, tint = Palette.textTertiary, modifier = Modifier.size(18.dp))
+                            },
+                            onClick = {},
+                        )
+                        Text(
+                            "Your only band already provides every day — activating isn't needed.",
+                            style = NoopType.footnote,
+                            color = Palette.textTertiary,
+                            modifier = Modifier
+                                .padding(horizontal = 16.dp, vertical = 2.dp)
+                                .widthIn(max = 240.dp),
+                        )
+                    } else {
+                        MenuItem("Make active", Icons.Filled.Bolt) { onOpenChange(false); onMakeActive() }
+                    }
                 }
                 MenuItem("Rename", Icons.Filled.Edit) { onOpenChange(false); onRename() }
                 if (onRemove != null) {

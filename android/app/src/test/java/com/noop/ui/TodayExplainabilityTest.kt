@@ -252,6 +252,26 @@ class TodayExplainabilityTest {
     }
 
     @Test
+    fun perMetric_computedSiblingOfARealStrapId_alsoReadsOnDevice() {
+        // IDENTITY FUSION: after "Make active" on a strap's REAL id the engine writes under
+        // "whoop-<mac>-noop". The old exact "$deviceId-noop" test missed it, so those days fell through to
+        // the grey static "WHOOP" pill — claiming an import that never happened. Both lineages of the one
+        // physical strap must read "On-device", whichever id is the active one.
+        val real = "whoop-C5:31:72:3C:F9:C5"
+        assertEquals("On-device", provenanceDisplayLabel("$real-noop", real))
+        // …and the pre-switch lineage stays "On-device" too, even while the OTHER id is active.
+        assertEquals("On-device", provenanceDisplayLabel("my-whoop-noop", real))
+    }
+
+    @Test
+    fun perMetric_realStrapIdItself_readsWhoop() {
+        // The bare (non-"-noop") real id is strap-imported data, so it keeps the "Whoop" label rather than
+        // falling through to the raw id verbatim.
+        val real = "whoop-C5:31:72:3C:F9:C5"
+        assertEquals("Whoop", provenanceDisplayLabel(real, real))
+    }
+
+    @Test
     fun perMetric_importedStrap_readsWhoop() {
         // The imported strap source (the deviceId itself, normally "my-whoop") is a real WHOOP export.
         assertEquals("Whoop", provenanceDisplayLabel("my-whoop"))

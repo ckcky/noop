@@ -707,6 +707,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     flagSet = { NoopPrefs.setEffortRescoreDone(appContext) },
                 )
             }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
+            // IDENTITY FUSION one-shot heal: an install that pressed "Make active" on a strap's REAL id
+            // under an older build scored its pre-switch days against the (empty) active-id stream, so they
+            // are banked thin or missing under the previous lineage. Clear the #836 watermark ONCE so the
+            // first tick below re-runs a full rescore now that the day-owner resolution sees both lineages
+            // (RegistryDayOwnerSource.candidatePriorities). Nothing is deleted here: the rescore wipes and
+            // re-derives only the engine's own computed rows for the window. Latched by a persisted flag,
+            // so the normal fingerprint gate resumes on every later launch.
+            runCatching {
+                if (!NoopPrefs.identityFusionHealDone(appContext)) {
+                    NoopPrefs.runIdentityFusionHeal(appContext)
+                    ble.externalLog(
+                        "Heal (identity fusion): cleared the analyze watermark once so this launch " +
+                            "re-scores the window with both strap lineages visible to the day-owner resolver.",
+                    )
+                }
+            }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
             while (isActive) {
                 // #547 RE-POLLUTION: a sync since the last tick may have flagged a re-heal (its ingest gate
                 // dropped bad-clock records). Re-run the purge BEFORE this tick's rescore so the affected days

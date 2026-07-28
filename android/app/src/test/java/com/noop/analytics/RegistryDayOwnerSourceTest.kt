@@ -178,6 +178,87 @@ class RegistryDayOwnerSourceTest {
         assertNull(src.skinTempFamily("not-in-registry"))
     }
 
+    // ── IDENTITY FUSION: one physical strap, two lineages ────────────────────────────────────────────
+    //
+    // Pressing "Make active" on a strap's REAL id re-points every new raw write at that id while the whole
+    // earlier history stays banked under the seeded canonical "my-whoop" — which has NO pairedDevice row of
+    // its own and could therefore never be a day-owner candidate. Pre-switch days then fell back to the
+    // active id, whose streams are empty for them, so they scored thin or not at all.
+
+    /** The canonical lineage joins the candidate set (priority 1) when the active strap runs under its own
+     *  real id, and the per-day hasData probe then routes each day to the lineage that actually holds it. */
+    @Test
+    fun canonicalLineageOwnsThePreSwitchDaysAfterMakeActive() = runBlocking {
+        val real = "whoop-C5:31:72:3C:F9:C5"
+        val dao = FakeDao().apply {
+            devices[real] = device(real, "WHOOP", SourceKind.liveBLE, DeviceStatus.active)
+        }
+        val src = RegistryDayOwnerSource(registry(dao))
+
+        // The canonical id is a candidate even though it has no registry row, ranked BELOW the active strap.
+        val priorities = src.candidatePriorities().toMap()
+        assertEquals(0, priorities[real])
+        assertEquals(1, priorities["my-whoop"])
+
+        // A day before the switch: only the canonical lineage banked raw → it owns the day, so the engine
+        // reads ITS streams instead of the active id's empty ones.
+        assertEquals(
+            "my-whoop",
+            resolveWith(src, "2026-07-15", mapOf(real to false, "my-whoop" to true)),
+        )
+        // A day after the switch: the active strap has the raw and outranks the canonical lineage.
+        assertEquals(
+            real,
+            resolveWith(src, "2026-07-24", mapOf(real to true, "my-whoop" to false)),
+        )
+        // The overlap day (both lineages banked raw): the ACTIVE strap wins — still exactly one owner (I2).
+        assertEquals(
+            real,
+            resolveWith(src, "2026-07-21", mapOf(real to true, "my-whoop" to true)),
+        )
+    }
+
+    /** Every single-WHOOP install: the active id IS the canonical one, so the candidate set must stay a
+     *  single entry — that is what keeps [IntelligenceEngine.resolveDayOwner]'s #970 single-candidate
+     *  short-circuit firing and the reads byte-identical. */
+    @Test
+    fun singleWhoopInstallKeepsExactlyOneCandidate() = runBlocking {
+        val dao = FakeDao().apply {
+            devices["my-whoop"] = device("my-whoop", "WHOOP", SourceKind.liveBLE, DeviceStatus.active)
+        }
+        val src = RegistryDayOwnerSource(registry(dao))
+        assertEquals(listOf("my-whoop"), src.candidatePriorities().map { it.first })
+    }
+
+    /** When a registry row already carries the canonical id, it must not be appended a second time (a
+     *  duplicate candidate would double the resolver's presence probes and could shadow its real priority). */
+    @Test
+    fun canonicalIsNotDuplicatedWhenItIsAlreadyPaired() = runBlocking {
+        val real = "whoop-C5:31:72:3C:F9:C5"
+        val dao = FakeDao().apply {
+            devices[real] = device(real, "WHOOP", SourceKind.liveBLE, DeviceStatus.active)
+            devices["my-whoop"] = device("my-whoop", "WHOOP", SourceKind.liveBLE, DeviceStatus.paired)
+        }
+        val src = RegistryDayOwnerSource(registry(dao))
+        val ids = src.candidatePriorities().map { it.first }
+        assertEquals(listOf(real, "my-whoop"), ids)
+        assertEquals(1, ids.count { it == "my-whoop" })
+    }
+
+    /** A non-WHOOP active source must NOT drag the canonical WHOOP lineage into its candidate set — the
+     *  fusion joins two lineages of ONE strap, never two brands (different sensors and scales; multi-brand
+     *  fusion stays out of scope). An Oura-active install must resolve exactly as it did before. */
+    @Test
+    fun canonicalLineageIsNotOfferedToANonWhoopActiveDevice() = runBlocking {
+        val dao = FakeDao().apply {
+            devices["oura"] = device("oura", "Oura", SourceKind.cloudImport, DeviceStatus.active)
+        }
+        val src = RegistryDayOwnerSource(registry(dao))
+        assertEquals(listOf("oura"), src.candidatePriorities().map { it.first })
+        // A day the Oura did not cover stays an honest gap rather than borrowing the WHOOP lineage.
+        assertNull(resolveWith(src, "2026-07-15", mapOf("oura" to false, "my-whoop" to true)))
+    }
+
     @Test
     fun archivedDeviceIsNotACandidate() = runBlocking {
         val dao = FakeDao().apply {

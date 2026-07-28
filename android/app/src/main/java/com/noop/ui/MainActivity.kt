@@ -664,6 +664,26 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_EFFORT_RESCORE_DONE, true).apply()
     }
 
+    /** Whether the one-shot IDENTITY-FUSION heal has run. An install that pressed "Make active" on a
+     *  strap's REAL id before this build scored its pre-switch days against an empty active-id stream, so
+     *  those days are banked thin (or missing) under the old lineage. The heal clears
+     *  [KEY_ANALYZE_WATERMARK] exactly once, which makes the next idle tick re-run a full [maxDays] rescore
+     *  with the fused day-owner resolution in place; the engine then wipes and re-derives its OWN computed
+     *  rows for the window (imports and raw samples are never touched). Set true once cleared so the
+     *  forced rescore never repeats — after that the normal #836 fingerprint gate resumes. */
+    const val KEY_IDENTITY_FUSION_HEAL_DONE = "noop.identityFusionHeal.done"
+
+    fun identityFusionHealDone(context: Context): Boolean =
+        of(context).getBoolean(KEY_IDENTITY_FUSION_HEAL_DONE, false)
+
+    /** Clear the analyze watermark once so the next tick re-scores the whole window, then latch the flag. */
+    fun runIdentityFusionHeal(context: Context) {
+        of(context).edit()
+            .remove(KEY_ANALYZE_WATERMARK)
+            .putBoolean(KEY_IDENTITY_FUSION_HEAL_DONE, true)
+            .apply()
+    }
+
     /** Whether the one-shot #547 implausible-timestamp heal has run. Set true once it completes so the
      *  on-upgrade purge of bad-strap-clock rows (far-past / future-dated) never re-runs. Re-running is
      *  harmless (the deletes are idempotent), but the flag avoids the work on every launch. */
