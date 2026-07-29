@@ -268,8 +268,12 @@ jobs:
               | sed -E 's/^[[:space:]]*[-*][[:space:]]+//' > items.txt || true
           fi
           if [ ! -s items.txt ]; then
-            # No PR (or a PR with no bullets): fall back to commit subjects since the previous tag.
-            PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo '')
+            # No PR (or a PR with no bullets): fall back to commit subjects. Measure from the last
+            # STABLE tag, not simply the last tag — every preview build publishes its own `-pre` tag,
+            # so "since the last tag" would shrink to the single commit pushed since the previous
+            # preview. What someone testing a preview actually wants is everything that is in it but
+            # not yet in stable, which is exactly the range since the last stable release.
+            PREV=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-pre' 2>/dev/null || echo '')
             RANGE="${PREV:+${PREV}..}HEAD"
             git log --no-merges --pretty=format:'%s' $RANGE | head -20 > items.txt || true
           fi
@@ -277,6 +281,12 @@ jobs:
           # shows the title alone) than a bare version string.
           [ -n "$TITLE" ] || TITLE=$(git log -1 --no-merges --pretty=format:'%s' || true)
           [ -n "$TITLE" ] || TITLE="Choop $NEW"
+          # Drop any bullet that just repeats the title (the common single-commit case), so the notes
+          # never render the same sentence twice.
+          if [ -s items.txt ]; then
+            grep -vxF "$TITLE" items.txt > items.trim.txt || true
+            mv items.trim.txt items.txt
+          fi
           echo "Release notes title: $TITLE"; echo "--- items ---"; cat items.txt || true
           python3 tools/release-notes.py \
             --version "$NEW" \
