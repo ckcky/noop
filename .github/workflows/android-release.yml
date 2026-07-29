@@ -276,9 +276,18 @@ jobs:
           fi
           if [ -n "$PR_JSON" ]; then
             TITLE=$(printf '%s' "$PR_JSON" | jq -r '.title // ""')
-            # Bullet lines from the PR body ("- x" / "* x"), markdown markers kept — the app renders
-            # **bold** and the release page does too. Checkbox lines are template scaffolding, skipped.
-            printf '%s' "$PR_JSON" | jq -r '.body // ""' \
+            BODY=$(printf '%s' "$PR_JSON" | jq -r '.body // ""')
+            # Only the "What this PR does" section supplies the changelog. A PR body also describes how
+            # the change was TESTED, and those bullets are for reviewers, not for the user's Updates
+            # inbox — reading the whole body would ship "simulated all six ref/mode combinations" as a
+            # release note. Falls back to the whole body when the section is absent (a PR that didn't
+            # use the template).
+            SECTION=$(printf '%s\n' "$BODY" \
+              | awk '/^##[[:space:]]+What this PR does/{f=1;next} f && /^#+[[:space:]]/{exit} f')
+            [ -n "$SECTION" ] || SECTION="$BODY"
+            # Bullet lines ("- x" / "* x"), markdown markers kept — the app renders **bold** and the
+            # release page does too. Checkbox lines are template scaffolding, skipped.
+            printf '%s\n' "$SECTION" \
               | grep -E '^[[:space:]]*[-*][[:space:]]+' \
               | grep -vE '^[[:space:]]*[-*][[:space:]]+\[[ xX]\]' \
               | sed -E 's/^[[:space:]]*[-*][[:space:]]+//' > items.txt || true
