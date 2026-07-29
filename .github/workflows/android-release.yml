@@ -253,8 +253,11 @@ jobs:
         run: |
           set -euo pipefail
           TITLE=""
-          # `gh pr view <branch>` resolves the open PR whose head is this branch, if there is one.
-          PR_JSON=$(gh pr view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json title,body 2>/dev/null || echo '')
+          # The OPEN PR whose head is this branch, if there is one. Restricted to --state open on
+          # purpose: branch names get reused, and `gh pr view <branch>` happily resolves a long-MERGED
+          # PR for the same name — which would stamp an old PR's title onto a brand-new release.
+          PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$REF_NAME" --state open \
+            --limit 1 --json title,body --jq '.[0] // empty' 2>/dev/null || echo '')
           if [ -n "$PR_JSON" ]; then
             TITLE=$(printf '%s' "$PR_JSON" | jq -r '.title // ""')
             # Bullet lines from the PR body ("- x" / "* x"), markdown markers kept — the app renders
@@ -270,6 +273,9 @@ jobs:
             RANGE="${PREV:+${PREV}..}HEAD"
             git log --no-merges --pretty=format:'%s' $RANGE | head -20 > items.txt || true
           fi
+          # Title fallback: the newest commit subject reads far better in the Updates inbox row (which
+          # shows the title alone) than a bare version string.
+          [ -n "$TITLE" ] || TITLE=$(git log -1 --no-merges --pretty=format:'%s' || true)
           [ -n "$TITLE" ] || TITLE="Choop $NEW"
           echo "Release notes title: $TITLE"; echo "--- items ---"; cat items.txt || true
           python3 tools/release-notes.py \
