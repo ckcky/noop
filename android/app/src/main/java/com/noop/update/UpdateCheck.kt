@@ -30,9 +30,50 @@ object UpdateCheck {
 
     sealed interface Result {
         data class UpToDate(val version: String) : Result
-        data class Available(val version: String, val url: String, val notes: String) : Result
+
+        /**
+         * A newer build for THIS channel exists.
+         *
+         * @property url the Release page — the human fallback (and what we open if there is no asset).
+         * @property apkUrl direct download for the channel-correct APK asset, when the release carries
+         *   one. Non-null is what lets [UpdateInstaller] update in place without a browser detour;
+         *   null means the release had no matching asset and we fall back to opening [url].
+         */
+        data class Available(
+            val version: String,
+            val url: String,
+            val notes: String,
+            val apkUrl: String? = null,
+            val apkName: String? = null,
+        ) : Result
+
         object Failed : Result
     }
+
+    /** One downloadable file attached to a GitHub release. */
+    data class Asset(val name: String, val url: String, val size: Long)
+
+    /**
+     * Pick the APK that belongs to THIS channel — the second half of the channel-isolation guarantee.
+     * [newestPreviewRelease] already makes sure a preview install only ever looks at pre-releases; this
+     * makes sure that, once we auto-download, we hand the installer the right FILE. A release can carry
+     * several APKs (stable, preview, demo), and installing the wrong one is not a no-op: a stable APK
+     * has a different applicationId, so it would install a SECOND app rather than update this one.
+     *
+     * Naming contract with the release workflow's "Stage APKs" step:
+     *   stable  → `Choop-v<version>.apk`
+     *   preview → `Choop-Preview-v<version>.apk`
+     *   demo    → `Choop-v<version>-demo.apk`   (never offered as an update)
+     * So "Preview" in the filename is the channel marker, and we require an exact match on it in BOTH
+     * directions — a preview install takes only Preview-named APKs, a stable install only takes the
+     * ones without it. Anything unrecognised yields null and the UI falls back to the release page.
+     */
+    internal fun pickApk(assets: List<Asset>, preview: Boolean): Asset? =
+        assets.firstOrNull { a ->
+            a.name.endsWith(".apk", ignoreCase = true) &&
+                !a.name.contains("-demo", ignoreCase = true) &&
+                a.name.contains("Preview", ignoreCase = true) == preview
+        }
 
     /** Fetch the latest release for the channel and classify it against [currentVersion]. Pass
      *  [includePrereleases] = true on the preview channel (`BuildConfig.CHANNEL == "preview"`).
@@ -48,12 +89,11 @@ object UpdateCheck {
     /** Stable channel: GitHub's `/releases/latest` (pre-releases are excluded by GitHub itself). */
     private fun checkLatest(currentVersion: String): Result {
         val body = fetch(LATEST_ENDPOINT) ?: return Result.Failed
-        val json = JSONObject(body)
-        val latest = json.getString("tag_name").removePrefix("v")
-        val url = json.getString("html_url")
-        val notes = cleanNotes(json.optString("body", ""))
-        return if (isNewer(latest, currentVersion)) Result.Available(latest, url, notes)
-        else Result.UpToDate(latest)
+        val rel = parseRelease(JSONObject(body)) ?: return Result.Failed
+        val latest = rel.version()
+        if (!isNewer(latest, currentVersion)) return Result.UpToDate(latest)
+        val apk = pickApk(rel.assets, preview = false)
+        return Result.Available(latest, rel.url, rel.notes, apk?.url, apk?.name)
     }
 
     /** One GitHub release as the list endpoint reports it, reduced to what the preview selector needs. */
@@ -63,6 +103,7 @@ object UpdateCheck {
         val draft: Boolean,
         val url: String,
         val notes: String,
+        val assets: List<Asset> = emptyList(),
     ) {
         /** The numeric version the tag carries, "v" stripped (e.g. "v8.3.0-pre" → "8.3.0-pre"). */
         fun version(): String = tag.removePrefix("v")
@@ -93,21 +134,35 @@ object UpdateCheck {
         val arr = JSONArray(body)
         val releases = ArrayList<ReleaseInfo>(arr.length())
         for (i in 0 until arr.length()) {
-            val rel = arr.optJSONObject(i) ?: continue
-            releases += ReleaseInfo(
-                tag = rel.optString("tag_name", ""),
-                prerelease = rel.optBoolean("prerelease", false),
-                draft = rel.optBoolean("draft", false),
-                url = rel.optString("html_url", ""),
-                notes = cleanNotes(rel.optString("body", "")),
-            )
+            releases += parseRelease(arr.optJSONObject(i) ?: continue) ?: continue
         }
         val found = newestPreviewRelease(releases) ?: return Result.UpToDate(currentVersion)
-        return if (isNewer(found.version(), currentVersion)) {
-            Result.Available(found.version(), found.url, found.notes)
-        } else {
-            Result.UpToDate(found.version())
+        if (!isNewer(found.version(), currentVersion)) return Result.UpToDate(found.version())
+        val apk = pickApk(found.assets, preview = true)
+        return Result.Available(found.version(), found.url, found.notes, apk?.url, apk?.name)
+    }
+
+    /** One release JSON object → [ReleaseInfo], assets included. Null when it carries no usable tag. */
+    private fun parseRelease(o: JSONObject): ReleaseInfo? {
+        val tag = o.optString("tag_name", "")
+        if (tag.isEmpty()) return null
+        val assetsArr = o.optJSONArray("assets")
+        val assets = ArrayList<Asset>(assetsArr?.length() ?: 0)
+        for (i in 0 until (assetsArr?.length() ?: 0)) {
+            val a = assetsArr?.optJSONObject(i) ?: continue
+            val name = a.optString("name", "")
+            // browser_download_url is the unauthenticated direct link — no API token, no redirect dance.
+            val url = a.optString("browser_download_url", "")
+            if (name.isNotEmpty() && url.isNotEmpty()) assets += Asset(name, url, a.optLong("size", 0L))
         }
+        return ReleaseInfo(
+            tag = tag,
+            prerelease = o.optBoolean("prerelease", false),
+            draft = o.optBoolean("draft", false),
+            url = o.optString("html_url", ""),
+            notes = cleanNotes(o.optString("body", "")),
+            assets = assets,
+        )
     }
 
     /** One GET against the GitHub API; null on any non-200 / transport problem. */
@@ -154,6 +209,11 @@ object UpdateCheck {
         var s = body.substringBefore("Downloads")
         for (marker in listOf("**", "## ", "# ")) s = s.replace(marker, "")
         s = s.trim()
-        return if (s.length > 700) s.take(700).trim() + "…" else s
+        // The update card scrolls its notes, so show the whole release rather than a teaser — these
+        // are now generated from the PR and are the user's only in-app description of what they are
+        // about to install. The cap is just a guard against a pathological body.
+        return if (s.length > MAX_NOTES) s.take(MAX_NOTES).trim() + "…" else s
     }
+
+    private const val MAX_NOTES = 2500
 }

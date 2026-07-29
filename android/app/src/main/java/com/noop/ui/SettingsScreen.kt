@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.Vibration
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -100,6 +101,7 @@ import com.noop.data.DataBackup
 import com.noop.ingest.RawSensorExport
 import com.noop.ingest.WhoopCsvExporter
 import com.noop.update.UpdateCheck
+import com.noop.update.UpdateInstaller
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1880,8 +1882,18 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                         }
                     }
 
-                    // Update available: show what's new, with a download straight to the release.
+                    // Update available: the release notes, and a one-tap download-and-install. The APK
+                    // is fetched straight into the app's cache and handed to Android's package
+                    // installer (UpdateInstaller) — no browser, no Downloads folder, and no chance of
+                    // picking the wrong channel's file by hand. We only ever download the asset
+                    // UpdateCheck.pickApk resolved for THIS channel; if the release carries no matching
+                    // APK we fall back to opening the release page.
                     (updResult as? UpdateCheck.Result.Available)?.let { avail ->
+                        var dlProgress by remember(avail.version) { mutableStateOf<Int?>(null) }
+                        var dlError by remember(avail.version) { mutableStateOf<String?>(null) }
+                        var needsUnknownSources by remember(avail.version) { mutableStateOf(false) }
+                        val busy = dlProgress != null
+
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1898,20 +1910,104 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                                     modifier = Modifier.weight(1f),
                                 )
                                 NoopButton(
-                                    text = "Download",
+                                    text = when {
+                                        busy -> "Downloading…"
+                                        avail.apkUrl == null -> "Open release"
+                                        else -> "Update"
+                                    },
                                     leadingIcon = Icons.Filled.Download,
                                     kind = NoopButtonKind.Primary,
+                                    enabled = !busy,
                                     onClick = {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(avail.url)))
+                                        val apkUrl = avail.apkUrl
+                                        val apkName = avail.apkName
+                                        if (apkUrl == null || apkName == null) {
+                                            // No channel-matching asset on the release — hand off to the page.
+                                            context.startActivity(
+                                                Intent(Intent.ACTION_VIEW, Uri.parse(avail.url)),
+                                            )
+                                        } else {
+                                            dlError = null
+                                            needsUnknownSources = false
+                                            dlProgress = 0
+                                            scope.launch {
+                                                val res = UpdateInstaller.downloadAndInstall(
+                                                    context, apkUrl, apkName,
+                                                ) { p ->
+                                                    // Snapshot-state writes are thread-safe, so the IO
+                                                    // thread can report progress directly.
+                                                    if (p is UpdateInstaller.Progress.Downloading) {
+                                                        dlProgress = p.percent
+                                                    }
+                                                }
+                                                dlProgress = null
+                                                // Handoff → the system installer is now on screen.
+                                                if (res is UpdateInstaller.Progress.Failed) {
+                                                    if (res.reason == UpdateInstaller.NEEDS_PERMISSION) {
+                                                        needsUnknownSources = true
+                                                    } else {
+                                                        dlError = res.reason
+                                                    }
+                                                }
+                                            }
+                                        }
                                     },
                                 )
                             }
+
+                            // Determinate bar when the server sent a length, indeterminate otherwise.
+                            dlProgress?.let { pct ->
+                                if (pct >= 0) {
+                                    // Float `progress` (not the lambda overload) — this module is on
+                                    // Compose BOM 2024.06.00 ⇒ material3 1.2.1, where the lambda form
+                                    // does not exist yet.
+                                    LinearProgressIndicator(
+                                        progress = pct / 100f,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = Palette.accent,
+                                        trackColor = Palette.surfaceRaised,
+                                    )
+                                } else {
+                                    LinearProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = Palette.accent,
+                                        trackColor = Palette.surfaceRaised,
+                                    )
+                                }
+                            }
+
+                            if (needsUnknownSources) {
+                                // Android 8+ gates sideload installs per-app; send them to that toggle.
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        "Android needs permission to install app updates from Choop. " +
+                                            "Turn on \"Allow from this source\", then tap Update again.",
+                                        style = NoopType.footnote, color = Palette.textSecondary,
+                                    )
+                                    NoopButton(
+                                        text = "Open permission settings",
+                                        kind = NoopButtonKind.Secondary,
+                                        onClick = {
+                                            context.startActivity(
+                                                UpdateInstaller.unknownSourcesIntent(context),
+                                            )
+                                        },
+                                    )
+                                }
+                            }
+                            dlError?.let {
+                                Text(
+                                    "Couldn't download the update ($it). Try again, or open the release page.",
+                                    style = NoopType.footnote, color = Palette.statusWarning,
+                                )
+                            }
+
                             if (avail.notes.isNotEmpty()) {
                                 Text(
                                     avail.notes,
                                     style = NoopType.footnote, color = Palette.textSecondary,
                                     modifier = Modifier
-                                        .heightIn(max = 160.dp)
+                                        .heightIn(max = 220.dp)
                                         .verticalScroll(rememberScrollState()),
                                 )
                             }
@@ -1919,7 +2015,8 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     }
 
                     Text(
-                        "Checks GitHub for the latest version when you tap. Nothing else is sent.",
+                        "Checks GitHub for the latest version when you tap, and installs it in place " +
+                            "if you choose to. Nothing else is sent, and nothing updates on its own.",
                         style = NoopType.footnote, color = Palette.textTertiary,
                     )
                 }

@@ -269,6 +269,10 @@ class UpdateStore private constructor(private val prefs: SharedPreferences) {
                 kind = UpdateKind.WHATS_NEW,
                 title = if (title.isEmpty()) "What's new in Choop $version" else title,
                 message = "Choop $version is here — tap to read what's new.",
+                // The row's message promises "tap to read what's new", so make the tap actually open
+                // the full changelog sheet (the same one Settings → About → What's new shows). Without
+                // this the row only marked itself read and the promise went nowhere.
+                deepLink = DEEP_LINK_WHATS_NEW,
             ),
         )
     }
@@ -295,6 +299,10 @@ class UpdateStore private constructor(private val prefs: SharedPreferences) {
         private const val FILE = "noop_updates"
         private const val KEY_ITEMS = "updates.items"
         private const val KEY_LAST_SEEDED = "updates.lastSeededWhatsNewVersion"
+
+        /** Deep-link key for a release-note row: opens the full What's New changelog sheet. Resolved
+         *  by [AppRoot]'s inbox `onDeepLink`, alongside "trends". */
+        const val DEEP_LINK_WHATS_NEW = "whatsNew"
 
         /** Inbox guard-rails (#521). Cap the informational ([UpdateKind.READING]/[WHATS_NEW]) backlog and
          *  collapse an identical informational post landing within this window into the existing row, so

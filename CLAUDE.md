@@ -10,12 +10,16 @@ This fork ships an Android app in **two channels that install side by side**:
 **Never push code straight to `main`, and never cut a stable release before a preview has been approved by the user.** The flow is always:
 
 1. **Branch.** Make every change on a feature branch (e.g. `claude/...`), never directly on `main`.
-2. **Preview first — from the branch.** Cut a PREVIEW APK *from that branch*: Actions → **"Android Release APK"** (`.github/workflows/android-release.yml`), with `channel = preview` and `ref = <the branch>`.
-   - Use `mode = release-manual` with an explicit `version`, or `mode = release-auto` with a `bump`.
-   - The version **MUST be higher than the currently installed preview**, or the in-app "Check for updates" (which compares `versionName` numerically, newest pre-release wins) reports "up to date" and never offers it.
-   - This publishes `vX.Y.Z-pre` (a pre-release) with `Choop-Preview-vX.Y.Z.apk` attached.
-3. **User tests the preview.** The user installs it and feeds it their data via a `.noopbak` import (Settings → Backup & restore → Import). **Wait for the user's explicit OK.**
-4. **Only then: merge + stable.** Once the user confirms the preview is good, merge the branch into `main` and cut a **stable** release (`channel = stable`, or push a `vX.Y.Z` tag — a tag WITHOUT `-pre` is the stable channel). Only now do stable users get it.
+2. **Preview first — from the branch.** Actions → **"Android Release APK"** (`.github/workflows/android-release.yml`) → **"Use workflow from": the branch** → `mode = build`.
+   - **The channel is derived from the ref — you never pick it.** Any non-`main` ref ⇒ preview; `main` ⇒ stable. A stable release mode on a branch is rejected.
+   - A branch run **publishes a `vX.Y.Z.<run#>-pre` pre-release** with `Choop-Preview-vX.Y.Z.<run#>.apk` attached, so the user updates **from inside the app** (Settings → About → Check for updates → Update). No sideloading, no browser.
+   - Versioning is automatic and always strictly newer: `<highest published base>.<run number>`. Never hand-pick a preview version.
+3. **User tests the preview.** They update in-app (or import a `.noopbak` if it's a fresh install). **Wait for the user's explicit OK.**
+4. **Only then: merge + stable.** Once the user confirms the preview is good, merge the branch into `main` and cut a **stable** release on `main` (`mode = release-auto`, or push a `vX.Y.Z` tag — a tag WITHOUT `-pre` is the stable channel). Only now do stable users get it.
+
+**Release notes are generated, not hand-written.** `android/tools/release-notes.py` writes them into **both** `AppChangelog.kt` (compiled into the APK → the Updates inbox row and Settings → About → What's new) **and** the GitHub release body (→ what "Check for updates" shows), so the three surfaces can't drift.
+
+The text comes from the PR: its **title** becomes the headline, and the `- **Lead-in.** detail` bullets under **`## What this PR does`** become the changelog verbatim — that section only, so the "How it was tested" bullets stay with reviewers instead of shipping to users. A preview cut reads the branch's **open** PR (never a merged one — branch names get reused); a stable cut on `main` reads the PR it just merged. With no PR at all it falls back to commit subjects since the last **stable** tag. Write that section as user-facing prose and it needs no further editing.
 
 Do not skip step 3. **Previews come from branches; stable comes from `main`; `main` is only ever updated after a preview is approved.**
 
