@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "7.9.0"
+    const val CURRENT_VERSION = "8.2.31"
 
     data class Release(
         val version: String,
@@ -36,6 +36,18 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "8.2.31",
+            title = "Preview builds you can install from inside the app, with generated release notes",
+            date = "July 2026",
+            items = listOf(
+                "**Update from inside the app.** \"Check for updates\" now downloads the new version and hands it straight to Android's installer — no browser, no Downloads folder, no hunting for the right file. It can only ever fetch your own channel's APK.",
+                "**Try a branch without sideloading.** A build from any branch now publishes a preview release, so Choop Preview finds it under \"Check for updates\" like any other update. Stable never sees them.",
+                "**Release notes, everywhere they belong.** Every release writes its own notes into the Updates inbox, into Settings → About → \"What's new\", and into the update card — all generated from the pull request, so the three can never disagree.",
+                "**The Updates inbox scrolls.** Older entries and the \"Clear all\" / \"Mark all read\" buttons became unreachable once a few items had piled up. Tapping a release-note row now opens What's New, as it always said it would.",
+                "**Release notes read properly.** Bold lead-ins render as bold instead of showing raw asterisks.",
+            ),
+        ),
         Release(
             version = "7.9.0",
             title = "Coupled view, workouts rebuilt, journal numbers",
