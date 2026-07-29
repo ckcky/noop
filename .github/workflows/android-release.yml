@@ -111,6 +111,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags. The release-notes step derives its bullets from `git log` since the
+          # last STABLE tag, and the default shallow checkout (depth 1, no tags) gives it neither:
+          # `git describe` finds nothing and `git log` sees a single commit, so the notes collapsed to
+          # one line — or to nothing once the repeats-the-title filter ran.
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
