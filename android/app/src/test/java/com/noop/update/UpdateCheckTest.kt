@@ -67,4 +67,56 @@ class UpdateCheckTest {
         val releases = listOf(rel("v8.2.9", prerelease = false), rel("v8.2.8", prerelease = false))
         assertNull(UpdateCheck.newestPreviewRelease(releases))
     }
+
+    @Test
+    fun previewOrderingHandlesTheFourSegmentBuildVersions() {
+        // Branch previews are versioned <base>.<run#> (see the release workflow). The run number only
+        // ever grows, so the newest run must win — including against the plain 3-segment base, and
+        // across a base bump. A string compare would put "8.2.29.900" above "8.2.29.1300".
+        assertTrue(UpdateCheck.isNewer("8.2.29.1300", "8.2.29.900"))
+        assertTrue(UpdateCheck.isNewer("8.2.29.1300", "8.2.29"))
+        assertTrue(UpdateCheck.isNewer("8.2.30", "8.2.29.1300"))   // next stable outranks any preview of .29
+        assertFalse(UpdateCheck.isNewer("8.2.29.1300", "8.2.30"))
+        // The preview flavour's own "-preview" versionName suffix must not confuse the parse.
+        assertTrue(UpdateCheck.isNewer("8.2.29.1300", "8.2.29.1200-preview"))
+    }
+
+    // ── APK asset selection: the second half of channel isolation ────────────────────────────────
+
+    private fun asset(name: String) = UpdateCheck.Asset(name = name, url = "https://x/$name", size = 1)
+
+    @Test
+    fun previewPicksOnlyThePreviewApkAndStableOnlyTheStableOne() {
+        // A release can carry several APKs. Handing the installer the wrong one is NOT harmless: a
+        // stable APK has a different applicationId, so it would install a SECOND app instead of
+        // updating this one — the cross-channel mistake this whole design exists to prevent.
+        val assets = listOf(
+            asset("Choop-v8.3.0.apk"),
+            asset("Choop-Preview-v8.3.0.apk"),
+            asset("Choop-v8.3.0-demo.apk"),
+        )
+        assertEquals("Choop-Preview-v8.3.0.apk", UpdateCheck.pickApk(assets, preview = true)?.name)
+        assertEquals("Choop-v8.3.0.apk", UpdateCheck.pickApk(assets, preview = false)?.name)
+    }
+
+    @Test
+    fun apkPickIgnoresTheDemoBuildAndNonApkAssets() {
+        // A demo APK is a third applicationId and must never be offered as an update to either
+        // channel; non-APK assets (checksums, mapping files) are not installable at all.
+        val assets = listOf(
+            asset("Choop-v8.3.0-demo.apk"),
+            asset("checksums.txt"),
+            asset("mapping.txt"),
+        )
+        assertNull(UpdateCheck.pickApk(assets, preview = false))
+        assertNull(UpdateCheck.pickApk(assets, preview = true))
+    }
+
+    @Test
+    fun apkPickReturnsNullWhenTheChannelHasNoMatchingAsset() {
+        // A stable-only release offers nothing to a preview install (and vice versa). Null is the
+        // signal for "fall back to opening the release page", never "just take the other one".
+        assertNull(UpdateCheck.pickApk(listOf(asset("Choop-v8.3.0.apk")), preview = true))
+        assertNull(UpdateCheck.pickApk(listOf(asset("Choop-Preview-v8.3.0.apk")), preview = false))
+    }
 }

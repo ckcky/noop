@@ -10,6 +10,14 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- In-app update install (Settings → About → "Check for updates"). Choop is sideloaded, so a new
+         version arrives as an APK the app downloads and hands to Android's own package installer
+         (see update/UpdateInstaller.kt) instead of sending the user out to a browser and Downloads.
+         This permission only lets us ASK: Android still shows its install confirmation, "install
+         unknown apps" must be granted for this app, and the APK's signature must match the installed
+         one. Nothing installs in the background — it runs only when the user taps. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Android 12+ (API 31+) Bluetooth runtime permissions.
          neverForLocation: we do not derive physical location from BLE scans, so we
          can opt out of the location-permission requirement on API 31+. -->

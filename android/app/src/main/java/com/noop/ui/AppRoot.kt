@@ -78,6 +78,8 @@ import com.noop.R
 import com.noop.analytics.FusionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
@@ -280,6 +282,9 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val updateStore = remember { UpdateStore.from(context) }
     var showUpdatesInbox by remember { mutableStateOf(false) }
+    // The full changelog sheet, reachable from a release-note row in the inbox (and, independently,
+    // from Settings → About → What's new — both render the same [WhatsNewSheet]).
+    var showWhatsNew by remember { mutableStateOf(false) }
 
     run {
         Scaffold(
@@ -547,13 +552,18 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                     store = updateStore,
                     onClose = { showUpdatesInbox = false },
                     onDeepLink = { key ->
-                        // Map the inbox deep-link key to a route (only known keys route). "trends" is
-                        // the one real poster's target today; unknown keys just close the sheet.
-                        val route = when (key) {
-                            "trends" -> Destination.Trends.route
-                            else -> null
+                        // Map the inbox deep-link key to a destination (only known keys resolve;
+                        // unknown ones just close the sheet). "whatsNew" opens the changelog sheet
+                        // in place rather than navigating — it's the target of every release-note row.
+                        if (key == UpdateStore.DEEP_LINK_WHATS_NEW) {
+                            showWhatsNew = true
+                        } else {
+                            val route = when (key) {
+                                "trends" -> Destination.Trends.route
+                                else -> null
+                            }
+                            if (route != null && route != currentRoute) nav.navigateTopLevel(route)
                         }
-                        if (route != null && route != currentRoute) nav.navigateTopLevel(route)
                     },
                     onRestore = { cardId ->
                         // Flip the shared dismissed flag back off so the card reappears, and signal a
@@ -562,6 +572,19 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                         updateStore.restoreRequest = cardId
                     },
                 )
+            }
+        }
+
+        // The full changelog, opened by tapping a release-note row in the inbox. Same full-screen
+        // Dialog idiom Settings uses for its What's new / scoring-guide sheets.
+        if (showWhatsNew) {
+            Dialog(
+                onDismissRequest = { showWhatsNew = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Palette.surfaceBase) {
+                    WhatsNewSheet(onClose = { showWhatsNew = false })
+                }
             }
         }
     }
