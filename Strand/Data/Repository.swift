@@ -956,12 +956,21 @@ final class Repository: ObservableObject {
     /// already chosen the main-night GROUP (the 6.1.1 bridged group) and passes those blocks' starts; we
     /// only fetch each one's stored series so the Sleep tab can lay them along the hypnogram's timeline.
     /// A start with no stored series is omitted from the result (its key is absent).
+    ///
+    /// #1008: reads the computed UNION (`computedReadIds` , the active strap's "-noop" sibling FIRST, then
+    /// the canonical one), not a single id. The engine banks motion under the ACTIVE strap's computed id, so
+    /// a remove+re-add / strap switch splits the series across the two siblings: a single-id read dropped
+    /// whichever side a night wasn't scored under, and the Sleep tab's movement strip vanished mid-history
+    /// while the hypnogram (already union-joined) kept drawing. First NON-EMPTY series per start wins; a
+    /// single-device install collapses to one id and is byte-identical to the prior behaviour.
     func sessionMotions(starts: [Int]) async -> [Int: [Double]] {
         guard !starts.isEmpty, let store = await ensureStore() else { return [:] }
         var out: [Int: [Double]] = [:]
-        for start in starts {
-            if let m = try? await store.sessionMotion(deviceId: computedDeviceId, sessionStart: start), !m.isEmpty {
-                out[start] = m
+        for id in computedReadIds {
+            for start in starts where out[start] == nil {
+                if let m = try? await store.sessionMotion(deviceId: id, sessionStart: start), !m.isEmpty {
+                    out[start] = m
+                }
             }
         }
         return out
