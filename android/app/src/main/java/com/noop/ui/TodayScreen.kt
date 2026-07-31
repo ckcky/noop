@@ -839,7 +839,9 @@ fun TodayScreen(
     // (Baselines.minNightsSeed valid nights). Show honest "calibrating, N of 4 nights" progress
     // instead of a bare "No Data" so a new BLE-only user knows scores are coming, not broken. (PR #85)
     val recoveryCalibration: Int? = if (selectedDayOffset == 0) {
-        recoveryCalibrationNights(days, displayMetric?.recovery != null)
+        // Strictly-prior, matching the engine's causal baseline: tonight is scored against the nights
+        // BEFORE it, so tonight itself must not be counted towards the seed it hasn't reached yet.
+        recoveryCalibrationNights(days, displayMetric?.recovery != null, beforeDay = selectedDayKey)
     } else {
         null
     }
@@ -3785,15 +3787,21 @@ internal fun recoveryCalibrationNights(
     days: List<DailyMetric>,
     hasRecovery: Boolean,
     seed: Int = Baselines.minNightsSeed,
+    beforeDay: String? = null,
 ): Int? {
     if (hasRecovery) return null
+    // Count the nights the BASELINE actually sees for [beforeDay]: Charge is scored against the state as
+    // it stood strictly BEFORE that night, so the countdown has to exclude the night being scored too.
+    // Counting it made a 4th night read "not calibrating" while the engine still (correctly) refused to
+    // score it — the ring would fall through to a bare empty state on the very night the countdown ended.
+    val history = if (beforeDay != null) days.filter { it.day < beforeDay } else days
     // Match the baseline's validity predicate, not just non-null: Baselines.update only advances the
     // recovery seed (nValid) for nights whose avgHrv is within the HRV config bounds, so an implausible
     // out-of-range night must NOT be counted here either, else the displayed N could over-state nValid.
     val cfg = Baselines.hrvCfg
     // Include 0: a brand-new user (no banked nights) reads "Calibrating, 0 of N" on Charge, not a
     // bare "No data" that looks broken (#335). Caller gates past days to null; >= seed → null.
-    return days.count { val v = it.avgHrv; v != null && v in cfg.minVal..cfg.maxVal }
+    return history.count { val v = it.avgHrv; v != null && v in cfg.minVal..cfg.maxVal }
         .takeIf { it in 0 until seed }
 }
 

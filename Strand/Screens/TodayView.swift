@@ -906,7 +906,13 @@ struct TodayView: View {
 
     private func computeCalibration() -> Int? {
         guard selectedDayOffset == 0 else { return nil }
-        return RecoveryScorer.calibrationNights(nightlyHrv: repo.days.map(\.avgHrv),
+        // Strictly-prior, matching the engine's causal baseline: tonight is scored against the nights
+        // BEFORE it, so tonight itself must not count towards the seed it hasn't reached yet. Counting it
+        // made a 4th night read "not calibrating" while the engine still (correctly) refused to score it,
+        // dropping the ring into a bare empty state on the very night the countdown ended.
+        let todayKey = repo.today?.day ?? Repository.logicalDayKey(Date())
+        let priorHrv = repo.days.filter { $0.day < todayKey }.map(\.avgHrv)
+        return RecoveryScorer.calibrationNights(nightlyHrv: priorHrv,
                                                 hasRecovery: repo.today?.recovery != nil)
     }
 
