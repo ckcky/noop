@@ -272,6 +272,52 @@ object IntelligenceEngine {
         flagSet()
     }
 
+    /**
+     * FULL-history Charge rescore onto the causal baseline. Run once automatically on upgrade, and again
+     * whenever the user taps Settings → "Recalculate all Charge scores".
+     *
+     * WHY IT IS NEEDED: a normal pass only ever scores the trailing [maxDays] (21). Charge is now computed
+     * against the baseline as it stood strictly BEFORE each night, but only days inside that window get
+     * re-derived, so without this the last three weeks would sit on the new causal algorithm while every
+     * older day kept the value the old whole-history fold produced , a visible seam in Trends, Insights
+     * and the Charge history. Lifting the [maxDays] cap to the full history re-scores every day the user
+     * has raw HR for, from the same raw data, so the whole record lands on one definition.
+     *
+     * It rewrites ONLY the computed ("-noop") source, exactly like every other pass; imported rows are
+     * never touched. Re-running is harmless , with causal baselines a re-score is idempotent, which is the
+     * whole point , so the Settings button can be tapped as often as the user likes.
+     *
+     * [force] skips the latch (the Settings button); the automatic upgrade path leaves it false so the pass
+     * runs exactly once. The flag get/set are injected to keep this a pure-JVM analytics object (no Android
+     * Context) , the caller (AppViewModel) wires them to [com.noop.ui.NoopPrefs]. Mirrors the Swift twin.
+     */
+    suspend fun runCausalChargeRescoreIfNeeded(
+        repo: WhoopRepository,
+        profile: UserProfile = UserProfile(),
+        importedDeviceId: String = "my-whoop",
+        maxHROverride: Double? = null,
+        flagGet: () -> Boolean,
+        flagSet: () -> Unit,
+        force: Boolean = false,
+        historyDays: Int = EFFORT_RESCORE_HISTORY_DAYS,
+        baselineEpoch: Double = 0.0,
+        recoveryEpoch: Double = 0.0,
+    ) {
+        if (!force && flagGet()) return
+        analyzeRecent(
+            repo = repo,
+            profile = profile,
+            maxDays = historyDays,
+            importedDeviceId = importedDeviceId,
+            maxHROverride = maxHROverride,
+            // Honour a manual Recalibrate anchor, else the full-history pass would re-learn baselines the
+            // user explicitly reset and silently undo their recalibration.
+            baselineEpoch = baselineEpoch,
+            recoveryEpoch = recoveryEpoch,
+        )
+        flagSet()
+    }
+
     private suspend fun analyzeRecentOnCpu(
         repo: WhoopRepository,
         profile: UserProfile = UserProfile(),
@@ -621,29 +667,47 @@ object IntelligenceEngine {
         val respSorted = histRespByDay.entries.sortedBy { it.key }
         val respSeq = respSorted.map { it.value }
         val respDayKeys = respSorted.map { it.key }
+        // ── CAUSAL baselines: each night is scored against who the person was BEFORE it ────────────────
+        // Previously all four drivers were folded into ONE terminal state and EVERY day in the window was
+        // scored against it. That made a finished day's Charge depend on nights that came AFTER it, so
+        // each of the many daily rescores (the 15-min backstop, every offload chunk, every sleep edit)
+        // rewrote the stored score with a slightly different number — a day could read 54 in the evening
+        // and 45 the next day off identical inputs. [Baselines.foldHistoryPrefix] hands back the state as
+        // it stood before each night instead, which makes a day's score a pure function of its OWN night
+        // plus strictly-earlier ones: causal, and idempotent under re-running.
+        //
+        // Per-metric, over that metric's OWN sorted key list — deliberately NOT a unified key set. Padding
+        // a metric's absent days with nulls would advance nightsSinceUpdate and could flip a baseline to
+        // STALE, which silently drops the term (BaselineState.usable excludes STALE).
+        //
         // HRV baseline honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via
         // their parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
         // A 0.0 epoch is byte-identical to the plain fold, so scoring is unchanged until the user taps it.
-        val hrvBase2 = Baselines.foldHistory(hrvSeq, hrvDayKeys, hrvCfg, baselineEpoch)
-        val rhrBase2 = Baselines.foldHistory(rhrSeq, rhrDayKeys, rhrCfg, recoveryEpoch)
+        val hrvPrior = PriorBaselines(hrvDayKeys, hrvSeq, hrvCfg, baselineEpoch)
+        val rhrPrior = PriorBaselines(rhrDayKeys, rhrSeq, rhrCfg, recoveryEpoch)
         // Resp baseline mixes imported (cloud) values with on-device RSA estimates , acceptable: the
         // z-score is scale-tolerant, foldHistory winsorizes, and respRateBpm already carries no source
         // flag anywhere else (the illness gate treats it the same way). Gated on `usable` because
         // RecoveryScorer includes the resp term whenever a baseline object is present , a CALIBRATING
         // (<4-night) baseline would let one noisy RSA night move recovery (mirrors the skin-temp
-        // use-site gate; honest cold-start).
-        val respBase2 = Baselines.foldHistory(respSeq, respDayKeys, respCfg, recoveryEpoch).takeIf { it.usable }
+        // use-site gate; honest cold-start). The gate now applies to the PRIOR state, per day.
+        val respPrior = PriorBaselines(respDayKeys, respSeq, respCfg, recoveryEpoch)
         // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
         // so fold purely over the pass-1 nightly means in chronological order. (PR #85)
         // Gated on `usable` for consistency with the resp baseline above AND the Swift reference
-        // (IntelligenceEngine.swift:162 `skinFold.usable ? skinFold : nil`) , the use-site re-checks
+        // (IntelligenceEngine.swift `skinFold.usable ? skinFold : nil`) , the use-site re-checks
         // `usable` too, so this is belt-and-suspenders, but it keeps the platforms byte-aligned.
         val skinSorted = nightlySkinByDay.entries.sortedBy { it.key }
         val skinSeq = skinSorted.map { it.value }
         val skinDayKeys = skinSorted.map { it.key }
-        val skinBase2 = Baselines.foldHistory(skinSeq, skinDayKeys, skinCfg, recoveryEpoch).takeIf { it.usable }
-        val baselines2 = ProfileBaselines(
-            hrv = hrvBase2, restingHR = rhrBase2, resp = respBase2, skinTemp = skinBase2,
+        val skinPrior = PriorBaselines(skinDayKeys, skinSeq, skinCfg, recoveryEpoch)
+
+        // The four Charge baselines as they stood strictly BEFORE `day`.
+        fun baselinesBefore(day: String) = ProfileBaselines(
+            hrv = hrvPrior.before(day),
+            restingHR = rhrPrior.before(day),
+            resp = respPrior.before(day).takeIf { it.usable },
+            skinTemp = skinPrior.before(day).takeIf { it.usable },
         )
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
@@ -722,16 +786,22 @@ object IntelligenceEngine {
                 res.daily, res.sleepSessions, editsByStart, editOnsetByStart,
                 tzOffsetSeconds, habitualMidsleepSec,
             )
-            val recovery = recomputeRecovery(daily, baselines2)
+            // The baselines as they stood BEFORE this night — the same state every later pass will
+            // resolve for this day, which is what makes the re-score idempotent.
+            val priorBaselines = baselinesBefore(daily.day)
+            val recovery = recomputeRecovery(daily, priorBaselines)
             // Charge term-breakdown trace (Test Centre Group G): only when the Recovery test mode is on
             // (recoveryTraceSink non-null). Emits which term moved Charge and which was nil and forced the
             // renorm, tagged .recovery. The trace's score is RecoveryScorer.recovery verbatim, so the
             // `recovery` written above is unchanged. Zero cost when off (the sink stays null, this branch
             // is skipped, recoveryTraceLines is never built). Mirrors the Swift recoveryTraceActive wiring.
             if (recoveryTraceSink != null) {
-                for (line in recoveryTraceLines(daily, baselines2)) recoveryTraceSink(line)
+                for (line in recoveryTraceLines(daily, priorBaselines)) recoveryTraceSink(line)
             }
-            val skinTempDevC = recomputeSkinTempDev(res.nightlySkinTempC, baselines2.skinTemp)
+            // The skin-temp DEVIATION is scored against the prior baseline too. Leaving it on a terminal
+            // fold would keep feeding a moving value back into Charge through the wSkinTemp term, so the
+            // day would still drift even with a causal HRV/RHR baseline.
+            val skinTempDevC = recomputeSkinTempDev(res.nightlySkinTempC, priorBaselines.skinTemp)
             RestScorer.restFromDaily(daily)?.let { rest ->
                 restRows.add(MetricSeriesRow(deviceId = computedId, day = daily.day, key = "sleep_performance", value = rest))
             }
@@ -1168,6 +1238,40 @@ object IntelligenceEngine {
             updated.add(row.copy(energyKcal = energyKcal, avgHr = s.avgHr, maxHr = s.maxHr, strain = s.strain))
         }
         if (updated.isNotEmpty()) repo.upsertWorkouts(updated)
+    }
+
+    /**
+     * One metric's baseline history, queryable as "the state strictly BEFORE day X".
+     *
+     * Built once per run from [Baselines.foldHistoryPrefix] over that metric's own chronologically
+     * sorted nightly values, so the whole per-day lookup costs ONE fold plus a binary search per day —
+     * the same O(n) the single terminal fold used to cost.
+     *
+     * [keys] are "yyyy-MM-dd" ascending; `states[i]` is the baseline after folding `keys[0..<i]`, i.e.
+     * everything strictly before `keys[i]`. [terminal] is the fold over ALL entries, used for a day that
+     * sorts after every key. In practice every scored day is itself a key (pass 1 records one entry per
+     * scanned day, including a null for a night with no value), so [terminal] is a defensive fallback.
+     */
+    internal class PriorBaselines(
+        private val keys: List<String>,
+        values: List<Double?>,
+        private val cfg: MetricCfg,
+        baselineEpoch: Double = 0.0,
+    ) {
+        private val states: List<BaselineState> =
+            Baselines.foldHistoryPrefix(values, keys, cfg, baselineEpoch)
+        private val terminal: BaselineState =
+            Baselines.foldHistory(values, keys, cfg, baselineEpoch)
+
+        /** The baseline as it stood before [day]: the prefix state at the first key >= [day]. */
+        fun before(day: String): BaselineState {
+            if (keys.isEmpty()) return Baselines.emptyState(cfg)
+            // First index whose key is >= day. binarySearch returns the insertion point (-idx - 1) when
+            // absent, which is exactly that index; when present it IS that index.
+            val found = keys.binarySearch(day)
+            val idx = if (found >= 0) found else -found - 1
+            return if (idx < states.size) states[idx] else terminal
+        }
     }
 
     /**

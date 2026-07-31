@@ -491,11 +491,15 @@ struct CoupledView: View {
     /// gates the sheet through to the countdown instead.
     private var chargeDrivers: [ChargeDriver] {
         guard let row = breakdownRow, let hrv = row.avgHrv, let rhr = row.restingHr else { return [] }
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+        // STRICTLY-PRIOR fold, exactly as the engine's causal baselines (and TodayView.chargeDrivers): the
+        // displayed day is scored against who the person was BEFORE that night, so these rows reproduce
+        // the stored Charge instead of drifting away from it.
+        let priorDays = repo.days.filter { $0.day < row.day }
+        let hrvBase = Baselines.foldHistory(priorDays.map(\.avgHrv), cfg: Baselines.hrvCfg)
         guard hrvBase.usable else { return [] }
-        let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
+        let rhrBase = Baselines.foldHistory(priorDays.map { $0.restingHr.map(Double.init) },
                                             cfg: Baselines.restingHRCfg)
-        let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
+        let respBase = Baselines.foldHistory(priorDays.map(\.respRateBpm), cfg: Baselines.respCfg)
         // Rest-quality term = the same sleep performance the sleep row shows, ÷100 (AnalyticsEngine's form).
         let sleepPerf = sleepPerformance.map { $0 / 100.0 }
         return RecoveryScorer.chargeDrivers(
@@ -529,7 +533,10 @@ struct CoupledView: View {
                             }
                         }
                     } else {
-                        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+                        // Strictly-prior, matching `chargeDrivers` above and the engine's causal baseline.
+                        let priorDays = breakdownRow.map { r in repo.days.filter { $0.day < r.day } }
+                            ?? repo.days
+                        let hrvBase = Baselines.foldHistory(priorDays.map(\.avgHrv), cfg: Baselines.hrvCfg)
                         NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
                             ChargeBreakdownSection(
                                 drivers: drivers,

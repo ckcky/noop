@@ -337,6 +337,72 @@ public enum Baselines {
                              nightsSinceUpdate: 0, status: .calibrating)
     }
 
+    // MARK: - Prefix fold (causal baselines)
+
+    /// The no-history state both folds fall back to: centred on the config midpoint, spread at the
+    /// floor, nValid = 0 (so `usable` is false and no score is produced). Identical to what
+    /// `foldHistory` returns for an empty input.
+    public static func emptyState(cfg: MetricCfg) -> BaselineState {
+        BaselineState(baseline: (cfg.minVal + cfg.maxVal) / 2.0, spread: cfg.floorSpread,
+                      nValid: 0, nightsSinceUpdate: 0, status: .calibrating)
+    }
+
+    /// The baseline state as it stood BEFORE each night, i.e. element `i` is the state after folding
+    /// entries `0..<i` only. The same replay `update` runs — element `i` is exactly what `foldHistory`
+    /// over `values.prefix(i)` would produce — so this adds no new baseline maths, it only exposes the
+    /// intermediate states the fold already walks through.
+    ///
+    /// WHY: Charge for a night must be scored against who the person was BEFORE that night. Folding the
+    /// whole history into one terminal state and scoring every day against it makes a past day's score
+    /// depend on nights that happened after it, so the score moved on every re-run of the engine. With
+    /// the per-night state the score is causal AND idempotent: re-scoring an already-scored day yields
+    /// the identical number, so a repeat pass is a genuine no-op.
+    ///
+    /// Element 0 is the empty-history seed (nValid = 0, calibrating), so the first nights are refused by
+    /// the caller's `usable` gate rather than scored against themselves — the honest cold start.
+    ///
+    /// - Returns: a list the SAME length as `values`.
+    public static func foldHistoryPrefix(_ values: [Double?], cfg: MetricCfg) -> [BaselineState] {
+        var out: [BaselineState] = []
+        out.reserveCapacity(values.count)
+        var state: BaselineState? = nil
+        for v in values {
+            out.append(state ?? emptyState(cfg: cfg))
+            state = update(state, value: v, cfg: cfg)
+        }
+        return out
+    }
+
+    /// `foldHistoryPrefix` honouring a manual recalibration `baselineEpoch` (epoch SECONDS; 0 = none),
+    /// exactly as the day-keyed `foldHistory` overload does: a night whose day STARTS before the epoch is
+    /// DROPPED (not skip-and-hold), so the baseline re-seeds from the first on-or-after-epoch night. A
+    /// dropped night still gets an entry (the state carried at that point), so the result stays parallel
+    /// to `values`. With `baselineEpoch <= 0` this is byte-identical to the plain `foldHistoryPrefix`.
+    public static func foldHistoryPrefix(_ values: [Double?], dayKeys: [String], cfg: MetricCfg,
+                                         baselineEpoch: Double? = nil) -> [BaselineState] {
+        let epoch = baselineEpoch ?? hrvBaselineEpoch()
+        guard epoch > 0 else { return foldHistoryPrefix(values, cfg: cfg) }
+
+        let fmt = DateFormatter()
+        fmt.calendar = Calendar(identifier: .gregorian)
+        fmt.timeZone = TimeZone(secondsFromGMT: 0)
+        fmt.dateFormat = "yyyy-MM-dd"
+
+        var out: [BaselineState] = []
+        out.reserveCapacity(values.count)
+        var state: BaselineState? = nil
+        for (i, v) in values.enumerated() {
+            out.append(state ?? emptyState(cfg: cfg))
+            // Drop (not skip-and-hold) any night dated before the recalibration epoch.
+            if i < dayKeys.count, let d = fmt.date(from: dayKeys[i]),
+               d.timeIntervalSince1970 < epoch {
+                continue
+            }
+            state = update(state, value: v, cfg: cfg)
+        }
+        return out
+    }
+
     // MARK: - Deviation
 
     /// Compute z / delta / ratio / in-normal-range for a value vs a baseline.

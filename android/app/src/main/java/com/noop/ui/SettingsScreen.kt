@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Sensors
@@ -358,6 +359,9 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
     // that feeds Charge from tonight onward; the standing analyze loop picks it up on its next pass.
     // Fixes a baseline poisoned by a bad first week (worn sick, or early nights that anchored too high).
     var showRecalibrateConfirm by remember { mutableStateOf(false) }
+    // True while the full-history Charge rescore is running, so the button disables + reads "Recalculating…"
+    // instead of letting an impatient second tap queue another multi-minute pass.
+    var recalculatingCharge by remember { mutableStateOf(false) }
 
     // Whether the "Advanced" disclosure (experimental probes, diagnostics, raw-sensor export, Trends
     // report) is expanded. Default FALSE so a first-run user lands on the everyday sections instead of
@@ -1328,6 +1332,42 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     fullWidth = true,
                     modifier = Modifier.semantics { contentDescription = "Recalibrate Charge baseline" },
                     onClick = { showRecalibrateConfirm = true },
+                )
+                // Rebuild the WHOLE Charge history on the current algorithm. Distinct from Recalibrate
+                // above: this does NOT move the baseline anchor or restart the build-up — it re-scores
+                // every day you have raw data for against the baseline as it stood before that night. A
+                // normal pass only covers the trailing 21 days, so this is the only way older days pick up
+                // a scoring change. Runs once automatically after an upgrade; this button re-runs it.
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Recalculate all Charge scores", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        "Rebuilds every day's Charge from your stored data, so your whole history uses the current scoring. Nothing is deleted and your baseline is not reset. Takes a minute or two in the background.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                NoopButton(
+                    text = if (recalculatingCharge) "Recalculating…" else "Recalculate all Charge scores",
+                    leadingIcon = Icons.Filled.Restore,
+                    kind = NoopButtonKind.Secondary,
+                    fullWidth = true,
+                    enabled = !recalculatingCharge,
+                    modifier = Modifier.semantics { contentDescription = "Recalculate all Charge scores" },
+                    onClick = {
+                        recalculatingCharge = true
+                        vm.recalculateAllCharge { ok ->
+                            recalculatingCharge = false
+                            Toast.makeText(
+                                context,
+                                if (ok) {
+                                    "Charge recalculated across your history."
+                                } else {
+                                    "Couldn't finish recalculating. Choop will catch up on its own."
+                                },
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    },
                 )
             }
         }

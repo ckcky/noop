@@ -640,11 +640,16 @@ struct TodayView: View {
     private var chargeDrivers: [ChargeDriver] {
         guard let row = chargeBreakdownRow,
               let hrv = row.avgHrv, let rhr = row.restingHr else { return [] }
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+        // STRICTLY-PRIOR fold, exactly as the engine's causal baselines: the displayed day is scored
+        // against who the person was BEFORE that night, so these rows reproduce the stored Charge. A
+        // whole-history fold (which is what this did before) folded the displayed night — and every night
+        // after it — into the baseline it was being measured against, so the sheet drifted from the ring.
+        let priorDays = repo.days.filter { $0.day < row.day }
+        let hrvBase = Baselines.foldHistory(priorDays.map(\.avgHrv), cfg: Baselines.hrvCfg)
         guard hrvBase.usable else { return [] }
-        let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
+        let rhrBase = Baselines.foldHistory(priorDays.map { $0.restingHr.map(Double.init) },
                                             cfg: Baselines.restingHRCfg)
-        let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
+        let respBase = Baselines.foldHistory(priorDays.map(\.respRateBpm), cfg: Baselines.respCfg)
         // Rest-quality term = the Rest composite ÷100, matching AnalyticsEngine's `sleepPerf`. `restScore`
         // is the same merged sleep_performance value the Rest ring reads, so the term stays consistent.
         let sleepPerf = restScore.map { $0 / 100.0 }
@@ -660,7 +665,10 @@ struct TodayView: View {
     /// `ScoreConfidence.charge` against the same folded HRV baseline the drivers scored with, so the dot +
     /// tier tag in the sheet header agree with the breakdown.
     private var chargeBreakdownConfidence: ScoreConfidence {
-        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
+        // Strictly-prior, matching `chargeDrivers` and the engine: the tier must describe the baseline the
+        // score was actually computed against, not one that includes the night being scored.
+        let priorDays = chargeBreakdownRow.map { row in repo.days.filter { $0.day < row.day } } ?? repo.days
+        let hrvBase = Baselines.foldHistory(priorDays.map(\.avgHrv), cfg: Baselines.hrvCfg)
         return ScoreConfidence.charge(recovery: chargeBreakdownRow?.recovery, hrvBaseline: hrvBase)
     }
 

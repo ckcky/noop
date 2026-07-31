@@ -3815,8 +3815,11 @@ internal fun recoveryChargeDrivers(
     val hrv = day.avgHrv ?: return emptyList()
     val rhr = day.restingHr?.toDouble() ?: return emptyList()
 
-    // Whole-history fold (oldest first), exactly as the engine seeds baselines2.
-    val ordered = days.sortedBy { it.day }
+    // STRICTLY-PRIOR fold (oldest first), exactly as the engine's causal baselines: the displayed day is
+    // scored against who the person was BEFORE that night, so these rows reproduce the stored Charge. A
+    // whole-history fold (which is what this did before) folded the displayed night — and every night
+    // after it — into the baseline it was being measured against, so the sheet drifted away from the ring.
+    val ordered = days.sortedBy { it.day }.filter { it.day < day.day }
     val hrvBase = Baselines.foldHistory(ordered.map { it.avgHrv }, Baselines.hrvCfg)
     if (!hrvBase.usable) return emptyList()
     val rhrBase = Baselines.foldHistory(ordered.map { it.restingHr?.toDouble() }, Baselines.restingHRCfg)
@@ -3848,8 +3851,12 @@ internal fun chargeConfidenceTier(
     days: List<DailyMetric>,
     displayDay: DailyMetric?,
 ): ScoreConfidence {
-    val hrvBase: BaselineState =
-        Baselines.foldHistory(days.sortedBy { it.day }.map { it.avgHrv }, Baselines.hrvCfg)
+    // Strictly-prior, matching the engine's causal baseline (and [recoveryChargeDrivers] above): the tier
+    // must describe the baseline the score was actually computed against, not one that includes the night
+    // being scored. With no displayed day the whole history is the best available answer.
+    val ordered = days.sortedBy { it.day }
+        .let { all -> displayDay?.let { d -> all.filter { it.day < d.day } } ?: all }
+    val hrvBase: BaselineState = Baselines.foldHistory(ordered.map { it.avgHrv }, Baselines.hrvCfg)
     return ScoreConfidence.forCharge(displayDay?.recovery, hrvBase)
 }
 

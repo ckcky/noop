@@ -664,6 +664,20 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_EFFORT_RESCORE_DONE, true).apply()
     }
 
+    /** Whether the one-shot FULL-history causal-Charge rescore has run. Charge is now scored against the
+     *  baseline as it stood strictly BEFORE each night, but a normal pass only covers the trailing 21 days,
+     *  so without this one-shot the recent window would sit on the new definition while older days kept the
+     *  values the old whole-history fold produced. Set true once the full-history pass completes so it never
+     *  repeats; the Settings "Recalculate all Charge scores" button re-runs it on demand (force = true). */
+    const val KEY_CAUSAL_CHARGE_RESCORE_DONE = "noop.causalChargeRescore.done"
+
+    fun causalChargeRescoreDone(context: Context): Boolean =
+        of(context).getBoolean(KEY_CAUSAL_CHARGE_RESCORE_DONE, false)
+
+    fun setCausalChargeRescoreDone(context: Context) {
+        of(context).edit().putBoolean(KEY_CAUSAL_CHARGE_RESCORE_DONE, true).apply()
+    }
+
     /** Whether the one-shot IDENTITY-FUSION heal has run. An install that pressed "Make active" on a
      *  strap's REAL id before this build scored its pre-switch days against an empty active-id stream, so
      *  those days are banked thin (or missing) under the old lineage. The heal clears
