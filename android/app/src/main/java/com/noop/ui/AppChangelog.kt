@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "8.2.31"
+    const val CURRENT_VERSION = "8.2.32"
 
     data class Release(
         val version: String,
@@ -36,6 +36,15 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "8.2.32",
+            title = "Sleep: bring the movement detail back after a strap switch",
+            date = "July 2026",
+            items = listOf(
+                "**Movement detail is back on your recent nights.** The small movement trace under the sleep curve stopped appearing partway through your history and read \"No movement detail for this night\" from then on. Nothing was lost — after you switched the active band, each new night's movement was filed under that band, while the Sleep tab still looked for it under the old one. It now looks under both, so the trace runs across the whole history again and keeps working the next time you change straps.",
+                "**No re-import or rescore needed.** The movement data was already on the phone the whole time; this only changes where the Sleep tab looks for it. Your nights, edits and scores are untouched.",
+            ),
+        ),
         Release(
             version = "8.2.31",
             title = "Preview builds you can install from inside the app, with generated release notes",
