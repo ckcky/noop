@@ -447,17 +447,33 @@ class WhoopRepository(private val dao: WhoopDao) {
      *  Motion is written ONLY under the computed ("-noop") source by the engine, so we read there; an
      *  imported-only night (no computed twin) has no motion (absent stays absent , an honest empty state,
      *  never a fabricated zero array). Does NOT resolve the night: the caller has already chosen the
-     *  main-night GROUP and passes those blocks' starts. A start with no stored series is omitted. Mirrors
-     *  iOS Repository.sessionMotions. */
+     *  main-night GROUP and passes those blocks' starts. A start with no stored series is omitted.
+     *
+     *  #1008: read the COMPUTED UNION (active strap's "-noop" sibling FIRST, then the canonical
+     *  "my-whoop-noop"), not one id. The engine banks motion under `<activeStrapId>-noop` (analyzeRecent's
+     *  `importedDeviceId` is the registry's ACTIVE id), so after a strap re-add / "Make active" every newly
+     *  scored night's series lands under the fresh id while the history stays under the canonical one ,
+     *  reading a single id dropped whichever side the night wasn't scored under and the Sleep tab showed
+     *  "No movement detail" from the switch onward. A single-device install collapses to one id, so the
+     *  read is byte-identical to the pre-union behaviour. Mirrors iOS Repository.sessionMotions. */
     suspend fun sessionMotions(strapDeviceId: String, starts: List<Long>): Map<Long, List<Double>> {
         if (starts.isEmpty()) return emptyMap()
-        val computedId = computedDeviceId(strapDeviceId)
-        val out = HashMap<Long, List<Double>>()
-        for (start in starts) {
-            val m = dao.sessionMotionJson(computedId, start)?.let { decodeDoubleArray(it) }
-            if (!m.isNullOrEmpty()) out[start] = m
+        // One indexed lookup per (id, start), and only for the starts a HIGHER-priority id hasn't already
+        // resolved , so the canonical fallback costs nothing on the nights the active strap scored, and a
+        // single-device install issues exactly the same query count as the pre-union read.
+        val perId = ArrayList<Map<Long, List<Double>>>()
+        var remaining = starts.distinct()
+        for (id in computedSourceIds(strapDeviceId)) {
+            if (remaining.isEmpty()) break
+            val byStart = HashMap<Long, List<Double>>()
+            for (start in remaining) {
+                val m = dao.sessionMotionJson(id, start)?.let { decodeDoubleArray(it) }
+                if (!m.isNullOrEmpty()) byStart[start] = m
+            }
+            perId.add(byStart)
+            remaining = remaining.filterNot { byStart.containsKey(it) }
         }
-        return out
+        return unionMotionByStart(perId)
     }
 
     /** Persist the decoded v18 band sleep_state per epoch for one session (H2), keyed by [sessionStart].
@@ -1277,6 +1293,22 @@ class WhoopRepository(private val dao: WhoopDao) {
          *  scores under "<importedDeviceId>-noop"). */
         fun computedSourceIdsFor(activeDeviceId: String): List<String> =
             importedSourceIdsFor(activeDeviceId).map { "$it-noop" }
+
+        /** Active-first merge of the per-epoch MOTION maps read under each #1008 computed union id
+         *  ([perId] in [computedSourceIdsFor] order, so the active strap's sibling comes first). The first
+         *  NON-EMPTY series per start wins; an empty/absent entry never masks a real series banked under a
+         *  later id, and a start with no series anywhere stays ABSENT from the result (the honest empty
+         *  state the Sleep tab renders as "No movement detail"). Pure companion form so the JVM tests
+         *  exercise it without Room ([MotionReadUnionTest]). Mirrors unionByDay's active-wins rule. (#407) */
+        internal fun unionMotionByStart(perId: List<Map<Long, List<Double>>>): Map<Long, List<Double>> {
+            val out = HashMap<Long, List<Double>>()
+            for (byStart in perId) {
+                for ((start, series) in byStart) {
+                    if (series.isNotEmpty() && out[start] == null) out[start] = series
+                }
+            }
+            return out
+        }
 
         /** Drop sleep blocks sharing an identical (startTs, endTs) , the same physical night recorded
          *  under two #814 union ids , keeping the FIRST seen (the callers pass active-strap-first lists,

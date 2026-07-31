@@ -216,10 +216,16 @@ fun SleepScreen(
     // `sleeps`; `selectNight` reads only the ALREADY-resolved main-night GROUP's entries (no re-resolution)
     // and lays them along the hypnogram's timeline. A block with no stored series stays absent (honest empty
     // state for older rows whose motionJSON is NULL). Mirrors iOS SleepView.motionByStart.
+    //
+    // Reads the ACTIVE-strap ∪ canonical COMPUTED union (#1008), like `sleeps` above , NOT the hardcoded
+    // canonical id. The engine banks motion under "<activeStrapId>-noop", so after a strap re-add /
+    // "Make active" every night scored from that day on lands under the fresh id: the canonical-only read
+    // found nothing and the strip vanished mid-history while the hypnogram (already union-joined) kept
+    // drawing. `sessionMotions` resolves the union; a single-device install collapses to one id.
     var motionByStart by remember { mutableStateOf<Map<Long, List<Double>>>(emptyMap()) }
     LaunchedEffect(sleeps) {
         motionByStart = runCatching {
-            vm.repo.sessionMotions("my-whoop", sleeps.map { it.startTs })
+            vm.repo.sessionMotions(vm.activeStrapId, sleeps.map { it.startTs })
         }.getOrDefault(emptyMap())
     }
 
