@@ -1138,7 +1138,8 @@ object IntelligenceEngine {
      * #137: re-score under-sampled manual workouts. Conservative + idempotent: only `manual` rows that
      * look under-scored (negligible calories), and only when the recompute from the now-denser HR
      * window is a genuine improvement , so a well-scored 4.0 workout is never touched and a still-sparse
-     * window is a no-op. Manual workouts + live/offloaded HR both live under [deviceId] ("my-whoop").
+     * window is a no-op. Manual workouts + live/offloaded HR both live under the strap lineage , read as
+     * the #1008 union of [deviceId] and the canonical id, since a re-add splits them across the two.
      */
     private suspend fun rescoreManualWorkouts(
         repo: WhoopRepository,
@@ -1148,7 +1149,11 @@ object IntelligenceEngine {
         nowSeconds: Long,
     ) {
         val since = nowSeconds - 14L * 86_400L
-        val rows = runCatching { repo.workouts(deviceId, since, nowSeconds) }.getOrNull() ?: return
+        // #1008: read the strap union, not [deviceId] alone. A manual row saved under the canonical
+        // lineage before a strap re-add was invisible to this pass afterwards, so its under-scored
+        // calories / blank Effort could never be healed. The upsert below writes `row.copy(...)`, which
+        // preserves each row's OWN deviceId, so every row is re-scored back into its own lineage.
+        val rows = runCatching { repo.workoutsUnion(deviceId, since, nowSeconds) }.getOrNull() ?: return
         val hrMax = maxHROverride ?: (208.0 - 0.7 * profile.age)   // Tanaka, matching endWorkout
         val updated = ArrayList<WorkoutRow>()
         for (row in rows) {
@@ -1157,7 +1162,7 @@ object IntelligenceEngine {
             // merged-workout case, where kcal is the SUM of inputs so it never looks under-scored yet
             // Effort stays blank forever). improves() then accepts a strain-only gain for the latter.
             if (!ManualWorkoutRescore.looksUnderScored(row.energyKcal) && row.strain != null) continue
-            val samples = runCatching { repo.hrSamples(deviceId, row.startTs, row.endTs, 20_000) }
+            val samples = runCatching { repo.hrSamplesUnion(deviceId, row.startTs, row.endTs, 20_000) }
                 .getOrNull() ?: continue
             val s = ManualWorkoutRescore.scored(samples, profile, hrMax) ?: continue
             if (!ManualWorkoutRescore.improves(s, row.energyKcal, row.strain, allowStrainOnlyFill = true)) continue
