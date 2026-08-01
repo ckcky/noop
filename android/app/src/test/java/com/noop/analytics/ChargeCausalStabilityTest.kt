@@ -121,6 +121,49 @@ class ChargeCausalStabilityTest {
         assertEquals(Baselines.foldHistory(hrv, hrvCfg), prior.before("2026-08-15"))
     }
 
+    /**
+     * Causality alone is not enough: the SET of nights feeding the baseline has to be stable too.
+     *
+     * Real failure this pins (from a user's strap log, app 8.2.32.78): consecutive analyze passes over the
+     * SAME static database scored 12 days in one pass and 21 in the next, because three of the five
+     * `analyzeRecent` callers omitted `ownerSource`. Without it every day resolves to the ACTIVE strap id,
+     * so on an install whose raw history splits across two lineages the pre-switch days read an empty
+     * stream, failed the MIN_HR_SAMPLES gate, and vanished from the fold entirely — not held flat as a
+     * missing night, absent. The trace showed day 2026-07-31 folding nValid=9 on the short passes; the long
+     * passes folded roughly twice that. The two pass types then rewrote each other's Charge every few
+     * minutes (27 ↔ 30, 51 ↔ 54) with every displayed input identical.
+     *
+     * This test does not exercise the wiring (that lives in the callers) — it pins the CONSEQUENCE, so the
+     * sensitivity is documented and measurable rather than argued about.
+     */
+    @Test
+    fun droppingEarlierNightsFromTheFoldMovesALaterDaysCharge() {
+        val shortHistory = days                       // 21 keys, the settled recent stretch
+        val shortHrv = hrv
+        // The same recent stretch PRECEDED by nine earlier, lower nights — the days a pass without an
+        // owner source silently drops.
+        val earlyDays = (1..9).map { "2026-06-%02d".format(it) }
+        val earlyHrv: List<Double?> = List(9) { 44.0 }
+
+        val fromShort = IntelligenceEngine.PriorBaselines(shortHistory, shortHrv, hrvCfg)
+            .before("2026-07-28")
+        val fromLong = IntelligenceEngine.PriorBaselines(earlyDays + shortHistory, earlyHrv + shortHrv, hrvCfg)
+            .before("2026-07-28")
+
+        // Same day, same inputs, different fold membership → a different baseline …
+        assertTrue(
+            "dropping earlier nights must change how many count toward the baseline",
+            fromShort.nValid != fromLong.nValid,
+        )
+        // … and therefore a different Charge, which is exactly what the user saw flipping.
+        val chargeShort = chargeFor28th(fromShort, null)!!
+        val chargeLong = chargeFor28th(fromLong, null)!!
+        assertTrue(
+            "an unstable fold moves the score visibly, not by a rounding wobble",
+            abs(chargeShort - chargeLong) > 1.0,
+        )
+    }
+
     @Test
     fun anEmptyHistoryIsNotUsableSoNoScoreIsFabricated() {
         val prior = IntelligenceEngine.PriorBaselines(emptyList(), emptyList(), hrvCfg)

@@ -705,6 +705,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
                     flagGet = { NoopPrefs.effortRescoreDone(appContext) },
                     flagSet = { NoopPrefs.setEffortRescoreDone(appContext) },
+                    // Same day-owner resolution as every other pass, so a two-lineage install scores the
+                    // same day set here as in the loop below.
+                    ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
                 )
             }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
             // One-shot on-upgrade FULL-history Charge rescore: Charge is now scored against the baseline as
@@ -720,6 +723,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
                     flagGet = { NoopPrefs.causalChargeRescoreDone(appContext) },
                     flagSet = { NoopPrefs.setCausalChargeRescoreDone(appContext) },
+                    ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
                     baselineEpoch = NoopPrefs.of(appContext)
                         .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
                     recoveryEpoch = NoopPrefs.of(appContext)
@@ -1330,6 +1334,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     flagGet = { NoopPrefs.causalChargeRescoreDone(appContext) },
                     flagSet = { NoopPrefs.setCausalChargeRescoreDone(appContext) },
                     force = true,
+                    ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
                     baselineEpoch = NoopPrefs.of(appContext)
                         .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
                     recoveryEpoch = NoopPrefs.of(appContext)

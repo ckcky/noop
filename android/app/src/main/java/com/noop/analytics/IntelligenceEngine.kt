@@ -260,6 +260,7 @@ object IntelligenceEngine {
         flagGet: () -> Boolean,
         flagSet: () -> Unit,
         historyDays: Int = EFFORT_RESCORE_HISTORY_DAYS,
+        ownerSource: DayOwnerSource? = null,
     ) {
         if (flagGet()) return
         analyzeRecent(
@@ -268,6 +269,11 @@ object IntelligenceEngine {
             maxDays = historyDays,
             importedDeviceId = importedDeviceId,
             maxHROverride = maxHROverride,
+            // Must match every other caller: without it each day resolves to the ACTIVE strap id, so an
+            // install whose history spans two lineages drops every pre-switch day (empty stream → the
+            // MIN_HR_SAMPLES gate) and this pass writes scores against a different, shorter baseline than
+            // the idle loop does.
+            ownerSource = ownerSource,
         )
         flagSet()
     }
@@ -302,6 +308,7 @@ object IntelligenceEngine {
         historyDays: Int = EFFORT_RESCORE_HISTORY_DAYS,
         baselineEpoch: Double = 0.0,
         recoveryEpoch: Double = 0.0,
+        ownerSource: DayOwnerSource? = null,
     ) {
         if (!force && flagGet()) return
         analyzeRecent(
@@ -310,6 +317,10 @@ object IntelligenceEngine {
             maxDays = historyDays,
             importedDeviceId = importedDeviceId,
             maxHROverride = maxHROverride,
+            // Must match every other caller — see runEffortRescoreIfNeeded. A full-history pass that
+            // resolved days to the active id alone would rebuild the WHOLE record against the short
+            // baseline, which is worse than not running it.
+            ownerSource = ownerSource,
             // Honour a manual Recalibrate anchor, else the full-history pass would re-learn baselines the
             // user explicitly reset and silently undo their recalibration.
             baselineEpoch = baselineEpoch,
