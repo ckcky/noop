@@ -69,6 +69,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -270,12 +271,25 @@ internal object MoreSectionPrefs {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppRoot(viewModel: AppViewModel = viewModel()) {
+fun AppRoot(
+    viewModel: AppViewModel = viewModel(),
+    deepLink: MutableState<String?>? = null,
+) {
     val nav = rememberNavController()
 
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val current = Destination.forRoute(currentRoute)
+
+    // Home-screen launcher shortcut: MainActivity stages the requested route here (see ShortcutRoutes);
+    // jump to it once, then clear the flag so a recomposition / config change can't re-fire the jump.
+    // Uses the same top-level nav as the bottom bar, so the target reads as a normal tab switch.
+    LaunchedEffect(deepLink?.value) {
+        val dl = deepLink ?: return@LaunchedEffect
+        val route = dl.value ?: return@LaunchedEffect
+        if (route != currentRoute) nav.navigateTopLevel(route)
+        dl.value = null
+    }
     var showQuickActions by remember { mutableStateOf(false) }
     // The Updates inbox sheet (opened by the Today header bell). The store is a process singleton so
     // the Today cards and the import path post to the same inbox this sheet renders.
