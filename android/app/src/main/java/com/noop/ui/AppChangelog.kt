@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "8.2.33"
+    const val CURRENT_VERSION = "8.2.34"
 
     data class Release(
         val version: String,
@@ -36,6 +36,14 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "8.2.34",
+            title = "Home-screen shortcuts for the app icon",
+            date = "August 2026",
+            items = listOf(
+                "**Long-press the app icon for quick actions.** Choop's home-screen icon now has shortcuts — press and hold it to jump straight to **Live HR**, **Start workout**, your **Journal**, or **Settings**, instead of opening the app and finding the screen yourself. They work whichever app icon you've picked.",
+            ),
+        ),
         Release(
             version = "8.2.33",
             title = "Workout detection works again, and your older workouts are back on the list",
