@@ -52,8 +52,6 @@
     <!-- Startbildschirm-Verknüpfungen (App-Icon lange drücken). Siehe res/xml/shortcuts.xml. -->
     <string name="shortcut_live_short">Live-HF</string>
     <string name="shortcut_live_long">Live-Herzfrequenz</string>
-    <string name="shortcut_sleep_short">Schlaf</string>
-    <string name="shortcut_sleep_long">Schlaf letzte Nacht</string>
     <string name="shortcut_workout_short">Workout</string>
     <string name="shortcut_workout_long">Workout starten</string>
     <string name="shortcut_journal_short">Journal</string>

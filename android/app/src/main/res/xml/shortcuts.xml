@@ -5,12 +5,12 @@
   plus the two the brief already called out (Journal, Settings).
 
   Ordering matters: launchers surface static shortcuts in declaration order and most only
-  show ~4 at once, so the strongest daily actions lead. Ranked:
-    1. Live HR      — the signature real-time heart-rate view
-    2. Sleep        — the morning "how did I sleep" glance
-    3. Start workout — begin a session in one tap
-    4. Journal      — log how you feel (maps to the Insights/journal screen)
-    5. Settings     — least "quick action"-y, so it trails
+  show ~4 at once. We keep the set to exactly four so all of them — Settings included — fit
+  in that window (Sleep was dropped for this reason). Ranked:
+    1. Live HR       — the signature real-time heart-rate view
+    2. Start workout — begin a session in one tap
+    3. Journal       — log how you feel (maps to the Insights/journal screen)
+    4. Settings      — the two the brief explicitly called out trail the daily actions
 
   Each shortcut launches an implicit VIEW intent with a "noop://open/<key>" data URI
   instead of an explicit component. That keeps the file flavor-independent: the four
@@ -30,17 +30,6 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:data="noop://open/live" />
-    </shortcut>
-
-    <shortcut
-        android:shortcutId="sleep"
-        android:enabled="true"
-        android:icon="@drawable/ic_shortcut_sleep"
-        android:shortcutShortLabel="@string/shortcut_sleep_short"
-        android:shortcutLongLabel="@string/shortcut_sleep_long">
-        <intent
-            android:action="android.intent.action.VIEW"
-            android:data="noop://open/sleep" />
     </shortcut>
 
     <shortcut

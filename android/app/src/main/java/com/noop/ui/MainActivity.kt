@@ -161,7 +161,6 @@ internal object ShortcutRoutes {
         if (uri == null || uri.scheme != "noop" || uri.host != "open") return null
         return when (uri.lastPathSegment) {
             "live" -> "live"          // Destination.Live
-            "sleep" -> "sleep"        // Destination.Sleep
             "workouts" -> "workouts"  // Destination.Workouts
             "journal" -> "insights"   // Destination.Insights — the journal lives on the Insights screen
             "settings" -> "settings"  // Destination.Settings
