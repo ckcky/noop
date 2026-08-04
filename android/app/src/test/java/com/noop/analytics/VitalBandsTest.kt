@@ -1,6 +1,7 @@
 package com.noop.analytics
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -12,6 +13,50 @@ class VitalBandsTest {
 
     private val hrvCfg = Baselines.metricCfg.getValue("hrv")
     private val hrvPop = 40.0..120.0
+
+    // MARK: goodness — the continuous 0..1 gradient position the tiles sample (1 = green, 0 = red).
+
+    @Test
+    fun goodness_isOne_whenTheValueSitsOnThePersonalBaseline() {
+        // 14 identical nights → value == personal mean → z = 0 → goodness = 1 (the green end).
+        val r = VitalBands.band(35.0, List(14) { 35.0 }, hrvPop, hrvCfg)
+        assertEquals(VitalBands.Basis.PERSONAL, r.basis)
+        assertEquals(1.0, r.goodness!!, 1e-6)
+    }
+
+    @Test
+    fun goodness_dropsBelowTheGreenZone_whenOutOfRange() {
+        // An out-of-range reading (|z| > sigmaK) falls below the in-range green floor (0.78), into the
+        // amber→red descent. It only reaches a hard 0 (red) at |z| = 3·sigmaK; see personalGoodness below.
+        val r = VitalBands.band(70.0, List(30) { 35.0 }, hrvPop, hrvCfg)
+        assertEquals(VitalBands.Band.OUT_OF_RANGE, r.band)
+        assert(r.goodness!! < 0.78) { "out-of-range should sit below the green zone, was ${r.goodness}" }
+    }
+
+    @Test
+    fun goodness_isNull_forNoData() {
+        assertNull(VitalBands.band(null, listOf(50.0), hrvPop, hrvCfg).goodness)
+    }
+
+    @Test
+    fun goodness_populationPath_isCoarseInVsOut() {
+        // SpO₂ has no personal cfg → population-only: inside typical range reads solidly green (0.85),
+        // outside amber-orange (0.35).
+        assertEquals(0.85, VitalBands.band(98.0, emptyList(), 95.0..100.0, null).goodness!!, 1e-9)
+        assertEquals(0.35, VitalBands.band(90.0, emptyList(), 95.0..100.0, null).goodness!!, 1e-9)
+    }
+
+    @Test
+    fun personalGoodness_keepsTheWholeInRangeBandInTheGreenZone() {
+        // The calibration point: a normal reading anywhere in-range (|z| <= sigmaK) maps to [0.78 .. 1.0]
+        // (green), NOT the amber middle. |z| = 1 (a perfectly ordinary night) must read green, not orange.
+        assertEquals(1.0, VitalBands.personalGoodness(0.0), 1e-9)
+        assertEquals(0.89, VitalBands.personalGoodness(1.0), 1e-9)   // |z| = 1 → still green
+        assertEquals(0.78, VitalBands.personalGoodness(VitalBands.sigmaK), 1e-9)  // in/out boundary
+        // Out-of-range eases down through amber toward red.
+        assert(VitalBands.personalGoodness(2.0 * VitalBands.sigmaK) < 0.5) { "far-off should be amber/red" }
+        assertEquals(0.0, VitalBands.personalGoodness(3.0 * VitalBands.sigmaK), 1e-9)  // red floor
+    }
 
     @Test
     fun nullValue_isNoData() {

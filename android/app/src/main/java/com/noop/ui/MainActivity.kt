@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,9 +47,18 @@ class MainActivity : ComponentActivity() {
             // the UI simply reflects connection state. No blocking here.
         }
 
+    /**
+     * The nav route requested by a home-screen launcher shortcut (long-press the app icon), or null
+     * for a normal launch. Seeded from the launch intent in [onCreate] and updated by [onNewIntent] for
+     * shortcuts fired while the app is already alive. [AppRoot] observes it, navigates once, then clears
+     * it back to null so a config change can't re-fire the same jump.
+     */
+    private val pendingDeepLink: MutableState<String?> = mutableStateOf(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        handleDeepLinkIntent(intent)
 
         // Demo build only: preload a full synthetic dataset so every screen is populated
         // out of the box (no strap, no import). No-op once seeded; never runs on the full app.
@@ -96,9 +107,27 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NoopTheme {
-                NoopRoot()
+                NoopRoot(deepLink = pendingDeepLink)
             }
         }
+    }
+
+    /**
+     * A launcher shortcut fired while this (singleTop) activity was already running is delivered here
+     * rather than starting a fresh instance. Keep [getIntent] in sync and route the new deep-link.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLinkIntent(intent)
+    }
+
+    /** Resolve a shortcut deep-link on [intent] to a nav route and stage it for [AppRoot]. No-op for a
+     *  normal launch, an unknown URI, or before onboarding (there's no app shell to navigate into yet). */
+    private fun handleDeepLinkIntent(intent: Intent?) {
+        val route = ShortcutRoutes.routeFor(intent?.data) ?: return
+        if (!NoopPrefs.of(this).getBoolean(NoopPrefs.KEY_ONBOARDED, false)) return
+        pendingDeepLink.value = route
     }
 
     /** Request the BLE permissions appropriate to the running OS version. */
@@ -118,6 +147,25 @@ class MainActivity : ComponentActivity() {
         }.toTypedArray()
 
         if (needed.isNotEmpty()) permissionLauncher.launch(needed)
+    }
+}
+
+/**
+ * Maps a home-screen launcher shortcut deep-link ("noop://open/<key>", declared in res/xml/shortcuts.xml)
+ * to the in-app nav route [AppRoot] understands. The target route ids are the stable `Destination.route`
+ * strings; because that enum is private to AppRoot they are repeated here as literals, so this table and
+ * the enum must be kept in step (each mapping notes its Destination for that reason).
+ */
+internal object ShortcutRoutes {
+    fun routeFor(uri: Uri?): String? {
+        if (uri == null || uri.scheme != "noop" || uri.host != "open") return null
+        return when (uri.lastPathSegment) {
+            "live" -> "live"          // Destination.Live
+            "workouts" -> "workouts"  // Destination.Workouts
+            "journal" -> "insights"   // Destination.Insights — the journal lives on the Insights screen
+            "settings" -> "settings"  // Destination.Settings
+            else -> null
+        }
     }
 }
 
@@ -239,6 +287,31 @@ object NoopPrefs {
 
     fun setContinuousHrvOvernight(context: Context, enabled: Boolean) {
         of(context).edit().putBoolean(KEY_CONTINUOUS_HRV_OVERNIGHT, enabled).apply()
+    }
+
+    /** Whether the Today vital tiles / rows / Recovery-vitals card colour by STATE (green on your baseline
+     *  → amber → red) instead of a fixed identity hue. Default false (identity). The state colours are
+     *  baseline-RELATIVE, so the SAME reading can shift colour day to day as the trailing baseline moves —
+     *  opt-in for users who want that signal on Today. (The Vital Signs screen always colours by state.) */
+    const val KEY_VITAL_STATE_COLOURS = "noop.vitalStateColours"
+
+    fun vitalStateColours(context: Context): Boolean =
+        of(context).getBoolean(KEY_VITAL_STATE_COLOURS, false)
+
+    fun setVitalStateColours(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_VITAL_STATE_COLOURS, enabled).apply()
+    }
+
+    /** Whether the support / donation surfaces show: the Today header heart, the Today Support card, the
+     *  donation-nudge card, and the More → Support entry. Default TRUE (unchanged behaviour); off hides
+     *  them all so nothing points at the Support page. */
+    const val KEY_SHOW_SUPPORT = "noop.showSupport"
+
+    fun showSupport(context: Context): Boolean =
+        of(context).getBoolean(KEY_SHOW_SUPPORT, true)
+
+    fun setShowSupport(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_SHOW_SUPPORT, enabled).apply()
     }
 
     /** Whether the strap log is mirrored to logcat. Default false (normal users don't log to adb). */
@@ -639,6 +712,26 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_EFFORT_RESCORE_DONE, true).apply()
     }
 
+    /** Whether the one-shot IDENTITY-FUSION heal has run. An install that pressed "Make active" on a
+     *  strap's REAL id before this build scored its pre-switch days against an empty active-id stream, so
+     *  those days are banked thin (or missing) under the old lineage. The heal clears
+     *  [KEY_ANALYZE_WATERMARK] exactly once, which makes the next idle tick re-run a full [maxDays] rescore
+     *  with the fused day-owner resolution in place; the engine then wipes and re-derives its OWN computed
+     *  rows for the window (imports and raw samples are never touched). Set true once cleared so the
+     *  forced rescore never repeats — after that the normal #836 fingerprint gate resumes. */
+    const val KEY_IDENTITY_FUSION_HEAL_DONE = "noop.identityFusionHeal.done"
+
+    fun identityFusionHealDone(context: Context): Boolean =
+        of(context).getBoolean(KEY_IDENTITY_FUSION_HEAL_DONE, false)
+
+    /** Clear the analyze watermark once so the next tick re-scores the whole window, then latch the flag. */
+    fun runIdentityFusionHeal(context: Context) {
+        of(context).edit()
+            .remove(KEY_ANALYZE_WATERMARK)
+            .putBoolean(KEY_IDENTITY_FUSION_HEAL_DONE, true)
+            .apply()
+    }
+
     /** Whether the one-shot #547 implausible-timestamp heal has run. Set true once it completes so the
      *  on-upgrade purge of bad-strap-clock rows (far-past / future-dated) never re-runs. Re-running is
      *  harmless (the deletes are idempotent), but the flag avoids the work on every launch. */
@@ -706,7 +799,7 @@ object NoopPrefs {
  * state on each transition.
  */
 @Composable
-fun NoopRoot() {
+fun NoopRoot(deepLink: MutableState<String?>? = null) {
     val context = LocalContext.current
     val prefs = remember { NoopPrefs.of(context) }
     val appViewModel: AppViewModel = viewModel()
@@ -759,8 +852,9 @@ fun NoopRoot() {
     }
 
     // Existing, onboarded user: render the app, and if they've updated since last launch
-    // (stored version behind current), show "What's New" once over the top.
-    AppRoot(viewModel = appViewModel)
+    // (stored version behind current), show "What's New" once over the top. The shortcut deep-link
+    // (if any) is forwarded so AppRoot can jump to the requested screen once its NavHost is up.
+    AppRoot(viewModel = appViewModel, deepLink = deepLink)
 
     if (lastSeenChangelog != AppChangelog.CURRENT_VERSION) {
         Dialog(

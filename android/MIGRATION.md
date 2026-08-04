@@ -148,32 +148,63 @@ For an ongoing off-device safety net, turn on **Settings → "Backup & Sync"**: 
 `.noopbak` written into a folder you choose (point it at a Drive/Dropbox sync folder). Nothing leaves
 the phone except the file your own sync client uploads.
 
-## The Preview channel (stable + preview side-by-side)
+## Channels: main ⇒ Stable, any branch ⇒ Preview (enforced)
 
-Edge-Canary style: next to stable **Choop** you can install **"Choop Preview"**
-(`com.kimchai.choop.preview`, the `preview` product flavor) to try features ahead of a stable
-release. Both are signed with the **same key** (no second keystore/secret — the separate
-`applicationId` is what keeps them apart), and each has its **own sandbox**: separate database,
-settings and permissions, so nothing can mix.
+Edge-Canary style: next to stable **Choop** you install **"Choop Preview"**
+(`com.kimchai.choop.preview`, the `preview` product flavor) to try a branch before it ships. Both
+are signed with the **same key** (no second keystore/secret — the separate `applicationId` keeps
+them apart), and each has its **own sandbox**: separate database, settings and permissions, so
+nothing can mix.
 
-- **Cutting a preview release:** Actions → *Android Release APK* → mode `release-auto` (or
-  `release-manual`) + **channel `preview`**. CI bumps the version, builds
-  `Choop-Preview-v<version>.apk`, tags it `v<version>-pre` and publishes it as a GitHub
-  **pre-release**. (A pushed tag containing `-pre` does the same.)
-- **Testing a BRANCH before merging** (the everyday case): Actions → *Android Release APK* →
-  **pick the feature branch** in the "Use workflow from" dropdown → mode **`apk-only`** + channel
-  **`preview`**. That builds `Choop-Preview-v<version>-<sha>.apk` as a downloadable **artifact**
-  (no tag, no Release, nothing committed) which installs over your existing Choop Preview.
-  Two things make this work:
-  - Preview-channel CI builds carry `versionCode = 1000 + run#` — strictly increasing across all
-    runs and branches — so a branch build always installs *over* any older Choop Preview, even
-    when the branch's own version lags main (Android would otherwise refuse it as a downgrade).
-  - The branch must **contain the preview-channel work** (this section's commits). For a branch
-    cut before that, merge/rebase `main` into it first — a dispatch runs the *branch's* copy of
-    the workflow, so an old branch would silently build the stable app instead.
-- **Update isolation:** stable's "Check for updates" reads `/releases/latest`, which GitHub keeps
-  free of pre-releases — stable never sees a preview build. Choop Preview reads the full release
-  list (including pre-releases) and updates onto the next preview cut.
+**The channel is DERIVED FROM WHERE THE WORKFLOW RUNS — you never pick it — which is what makes
+stable/preview mixing impossible:**
+
+| You run *Android Release APK* on… | Channel | What you get |
+|---|---|---|
+| the **`main`** branch | **stable** | `mode: build` → a stable dry-run artifact; `mode: release-auto`/`release-manual` → the next **stable release** (bump + tag + GitHub Release) |
+| **any other branch** | **preview** | only `mode: build` is allowed → a published **`vX.Y.Z.<run#>-pre` pre-release** with `Choop-Preview-vX.Y.Z.<run#>.apk` attached; a stable release mode is **rejected** ("stable releases are cut from main only") |
+| a pushed tag `v<x>` | stable | releases that tag |
+| a pushed tag `v<x>-pre` | preview | releases that tag as a pre-release |
+
+### The everyday flow (exactly your four rules)
+1. **Test a branch as preview:** push the branch → Actions → *Android Release APK* → **"Use workflow
+   from": your branch** → **mode `build`** (channel is auto `preview`) → it publishes a pre-release →
+   open **Choop Preview → Settings → About → Check for updates → Update**. It downloads and installs
+   itself; no browser, no file manager.
+2. **Like it → merge:** open a PR, merge to `main`.
+3. **Cut the stable release:** Actions → *Android Release APK* → **"Use workflow from": `main`** →
+   **mode `release-auto`** (channel is auto `stable`) → the next stable release.
+
+Three things make branch previews land cleanly:
+  - They are **published pre-releases**, not artifacts — that is what lets the app discover them.
+    (An artifact needs a logged-in GitHub session to download, so the app could never fetch one.)
+  - The version is `<highest published base>.<run number>`, so it is **always strictly newer** than
+    the installed preview — even when the branch's own version lags `main` — while still sorting
+    below the next stable patch (`8.2.29.1300` < `8.2.30`). `versionCode` is `1000 + run#` for the
+    same reason, so Android never rejects the install as a downgrade.
+  - The branch must **contain the channel work** (this section's commits) — a dispatch runs the
+    *branch's* copy of the workflow, so for a branch cut before this, merge `main` into it first.
+- **Update isolation, enforced on both ends:** stable's "Check for updates" reads `/releases/latest`,
+  which GitHub keeps free of pre-releases — stable never sees a preview build. Choop Preview reads
+  the full release list and keeps **only** entries flagged `prerelease` (`UpdateCheck.newestPreviewRelease`),
+  so it can never be offered a stable build. And when it downloads, it takes only the
+  `Choop-Preview-…apk` asset (`UpdateCheck.pickApk`) — a stable APK has a different applicationId and
+  would install a *second* app rather than update Preview.
+- **Old previews are pruned automatically:** the workflow keeps the newest 8 pre-releases and deletes
+  older ones (stable releases are never touched).
+
+### Updating from inside the app
+"Check for updates" now downloads the channel-correct APK into the app's own cache and hands it to
+Android's package installer. You confirm the install once (and, the first time, grant Choop "install
+unknown apps"). Nothing installs on its own, nothing is sent, and the signature check still applies —
+an APK signed with a different key is refused by Android, as it should be.
+
+### Release notes
+Every release's notes are generated by `android/tools/release-notes.py` from the PR (its title and the
+`- bullet` lines in its body), falling back to commit subjects. The same text goes to three places, so
+they can never disagree: the **Updates inbox** row (headline), **Settings → About → What's new** (full
+bullets, compiled into the APK), and the **GitHub release body** — which is what the update card shows
+you before you install.
 - **The strap stays with STABLE.** History offload is consume-on-read and a 5.0/MG bonds to one app
   (see above) — if Preview drains the strap, stable can never get that slice. Feed Preview with a
   `.noopbak` **import** from stable instead; that covers UI/feature testing. Pair Preview only to

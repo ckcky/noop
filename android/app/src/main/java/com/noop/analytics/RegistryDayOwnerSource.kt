@@ -1,9 +1,10 @@
 package com.noop.analytics
 
-import com.noop.ble.WhoopModel
+import com.noop.ble.whoopSkinTempFamily
 import com.noop.data.DeviceRegistry
 import com.noop.data.DeviceStatus
 import com.noop.data.SourceKind
+import com.noop.data.WhoopRepository
 import com.noop.protocol.DeviceFamily
 
 /**
@@ -21,7 +22,8 @@ class RegistryDayOwnerSource(private val registry: DeviceRegistry) : Intelligenc
 
     override suspend fun candidatePriorities(): List<Pair<String, Int>> {
         val activeId = registry.activeDeviceId()
-        return registry.all()
+        val all = registry.all()
+        val paired = all
             .filter { it.status != DeviceStatus.archived.name }
             .map { d ->
                 val isImport = d.sourceKind == SourceKind.cloudImport.name ||
@@ -33,6 +35,33 @@ class RegistryDayOwnerSource(private val registry: DeviceRegistry) : Intelligenc
                 }
                 d.id to priority
             }
+        // IDENTITY FUSION: the canonical legacy lineage has NO pairedDevice row of its own, so it could
+        // never become a day owner — the split this fixes. Pressing "Make active" on a strap's REAL id
+        // (e.g. "whoop-C5:…") re-points every new raw write at that id while the whole earlier history
+        // stays banked under the seeded "my-whoop". Days before the switch then had no candidate holding
+        // their data: the resolver fell back to the active id, whose streams are empty for those days, so
+        // they scored thin or not at all (and the pass-2 baseline folded ~5 nights instead of ~28).
+        //
+        // Adding the canonical id as a priority-1 candidate ("another live strap of the same person")
+        // lets the EXISTING per-day hasData probe in [IntelligenceEngine.resolveDayOwner] assign each day
+        // to whichever lineage actually holds its raw — pre-switch days to "my-whoop", post-switch days to
+        // the active id, which outranks it at priority 0 on any overlapping day. Invariant I2 is preserved:
+        // a day is still owned, read and scored from exactly ONE source; this only widens the candidate
+        // set to include a lineage that was invisible to it.
+        //
+        // Guarded so nothing else moves: skipped when the active id IS the canonical one (every
+        // single-WHOOP install — the resolver then still sees exactly one candidate and takes the #970
+        // single-candidate shortcut, byte-identical), when a registry row already carries the canonical id,
+        // and when there is no active device at all. Also gated on the active device being a WHOOP: this
+        // fuses two lineages of ONE strap, so an active Oura/Garmin/Mi Band must never pull WHOOP history
+        // into its days (multi-brand fusion is deliberately out of scope — different sensors and scales).
+        val canonical = WhoopRepository.WHOOP_SOURCE
+        val activeIsWhoop = activeId != null &&
+            all.firstOrNull { it.id == activeId }?.brand == WHOOP_BRAND
+        val needsCanonical = activeIsWhoop &&
+            activeId != canonical &&
+            paired.none { it.first == canonical }
+        return if (needsCanonical) paired + (canonical to 1) else paired
     }
 
     // Any dayOwnership override wins outright, regardless of its `locked` flag — matching the Swift
@@ -46,13 +75,22 @@ class RegistryDayOwnerSource(private val registry: DeviceRegistry) : Intelligenc
     // when they diverge, the #814/#799 spine symptom).
     override suspend fun activeWriteId(): String? = registry.activeDeviceId()
 
-    // #938: resolve the strap family that wrote [deviceId]'s rows from its registry model. A device whose
-    // model is "WHOOP 4.0" maps to WHOOP4 (raw-ADC skin-temp scale); everything else — a 5/MG, a non-WHOOP
-    // import whose skin temp is already °C, or an id absent from the registry — falls back to WHOOP5 (the
-    // prior /100 behaviour). Mirrors the Swift IntelligenceEngine.skinTempFamily(forOwner:devices:).
-    override suspend fun skinTempFamily(deviceId: String): DeviceFamily {
+    // #938: resolve the strap family that wrote [deviceId]'s rows from its registry model, WHEN the model
+    // confidently names one (WHOOP 4.0 → WHOOP4 raw-ADC scale; 5/MG → WHOOP5). Returns null — NOT a WHOOP5
+    // default — for a bare seeded "WHOOP", an EMPTY registry (a `.noopbak` import frequently has no
+    // pairedDevice row at all), a non-WHOOP import, or an absent id: [IntelligenceEngine.analyzeRecent]
+    // owns the final fallback, inferring the family from the device's own raw skin-temp magnitude
+    // ([AnalyticsEngine.inferSkinTempFamily]) before defaulting, so this must surface "don't know"
+    // honestly. [whoopSkinTempFamily] matches the short "4.0"/"5.0 MG" labels the Android wizard persists
+    // AND the Swift-parity full labels. Mirrors the Swift IntelligenceEngine.skinTempFamily(forOwner:).
+    override suspend fun skinTempFamily(deviceId: String): DeviceFamily? {
         val model = registry.all().firstOrNull { it.id == deviceId }?.model
-        return if (WhoopModel.entries.firstOrNull { it.displayName == model } == WhoopModel.WHOOP4)
-            DeviceFamily.WHOOP4 else DeviceFamily.WHOOP5
+        return whoopSkinTempFamily(model)
+    }
+
+    private companion object {
+        /** The `brand` value every WHOOP registry row carries (written by the add-device wizard and the
+         *  v7→v8 seed). Gates the canonical-lineage fusion in [candidatePriorities] to WHOOP straps only. */
+        const val WHOOP_BRAND = "WHOOP"
     }
 }

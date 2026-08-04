@@ -177,7 +177,11 @@ private fun ReleaseCard(release: AppChangelog.Release, isLatest: Boolean = false
                             .background(Palette.accent),
                     )
                     Text(
-                        item,
+                        // Changelog bullets lead with a **bold** phrase ("**Coupled view.** …"), and
+                        // generated notes carry whatever markdown the PR body used. Render it with the
+                        // app's existing inline-markdown parser (CoachMarkdown.parseInline, already
+                        // unit-tested) instead of printing the raw asterisks.
+                        parseInline(item, Palette.textSecondary),
                         style = NoopType.subhead,
                         color = Palette.textSecondary,
                         modifier = Modifier.weight(1f),

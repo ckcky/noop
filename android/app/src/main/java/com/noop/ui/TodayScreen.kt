@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.TrackChanges
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Info
@@ -184,7 +185,7 @@ private var todayDidSnapToTodayThisLaunch = false
 // The hero card the score vessels float on, ported from the iOS LiquidTodayView. `heroFill` is a
 // translucent near-black (mock rgba(13,14,20,.80)) so it floats over the day-of-sky; the vessels + white
 // count-up numbers read crisp on it. Radius 26 + a white@0.11 hairline give the frosted-glass edge.
-private val LIQUID_HERO_FILL: Color = Color(red = 13f / 255f, green = 14f / 255f, blue = 20f / 255f, alpha = 0.80f)
+private val LIQUID_HERO_FILL: Color get() = Palette.heroFill
 private val LIQUID_HERO_RADIUS: Dp = 26.dp
 
 // The Vitality vessel purple (#9b7bff) — no exact Palette token in this theme, so a fixed brand literal
@@ -224,6 +225,9 @@ fun TodayScreen(
     updateStore: UpdateStore? = null,
     onOpenUpdates: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    // The Today header avatar opens the Profile page (the "account" surface). Defaulted to onOpenSettings
+    // so an unbound caller keeps the old avatar→Settings behaviour; AppRoot binds it to the Profile route.
+    onOpenProfile: () -> Unit = onOpenSettings,
     onOpenHydration: () -> Unit = {},
     // #706/#684: the "Your cards" dashboard rows are tappable on iOS but only Hydration navigated on Android.
     // These push each card's detail (Stress card -> Stress; Sleep -> Sleep), matching the iOS pinnedCardRow
@@ -350,6 +354,9 @@ fun TodayScreen(
     // preference (SharedPreferences isn't reactive, a Settings write triggers recomposition).
     val context = LocalContext.current
     val unitSystem = UnitPrefs.system(context)
+    // Opt-in "colour Today vitals by state" (default off = identity tints). Read once like the other
+    // Settings-backed prefs; the Vital Signs screen always colours by state regardless.
+    val colourVitalsByState = NoopPrefs.vitalStateColours(context)
     // Effort display scale (#268), drives the Effort tile's value + caption. Display-only.
     val effortScale = UnitPrefs.effortScale(context)
     val profileWeightKg = remember { ProfileStore.from(context).weightKg }
@@ -369,6 +376,17 @@ fun TodayScreen(
     // SharedPreferences isn't reactive, so it's mirrored into local state and re-read when the editor saves.
     var showDashboardEditor by remember { mutableStateOf(false) }
     var enabledDashboardCards by remember { mutableStateOf(DashboardCardPrefs.enabled(context)) }
+
+    // Today section layout (order + visibility) — edited from Settings → Appearance → Today layout. Read
+    // FRESH each composition (a cheap prefs read + small JSON parse) rather than remembered: the edit
+    // happens on another screen, so the recomposition when you navigate back to Today picks up the change.
+    // SharedPreferences isn't reactive, and an activity ON_RESUME observer wouldn't fire on in-app nav.
+    val enabledTodaySections = TodaySectionPrefs.enabled(context)
+
+    // Whether the support / donation surfaces show (Today header heart, Support card, donation nudge, and
+    // the More → Support entry). Default ON; edited in Settings → Appearance. Read fresh each composition
+    // (like the flags above) so toggling it in Settings takes effect on return to Today.
+    val showSupport = NoopPrefs.showSupport(context)
 
     // The pinned "Your cards" values (Stress / Fitness age / Vitality), surfaced on Today so the buried
     // Explore features sit on the home screen (#582). The same merged resolvedSeries reads their detail
@@ -406,12 +424,16 @@ fun TodayScreen(
                 .associate { it.day to it.value.coerceIn(0.0, 3.0) }
             StressModel.build(days, stored)?.score
         }.getOrNull()
-        fitnessAgeToday = runCatching {
-            viewModel.repo.metricSeries("my-whoop-noop", "fitness_age", "0000-01-01", "9999-12-31").lastOrNull()?.value
-        }.getOrNull()
-        vitalityToday = runCatching {
-            viewModel.repo.metricSeries("my-whoop-noop", "vitality", "0000-01-01", "9999-12-31").lastOrNull()?.value
-        }.getOrNull()
+        // IDENTITY FUSION: Fitness Age / Vitality live ONLY under the engine's computed namespace, which
+        // splits in two after a "Make active" onto a strap's real id. Read every computed lineage and take
+        // the newest point by day, so the weekly score doesn't vanish (or freeze at the pre-switch value)
+        // the moment the engine starts writing under the new id. Single-WHOOP ⇒ one id ⇒ unchanged read.
+        suspend fun latestComputed(key: String): Double? =
+            WhoopRepository.computedSourceIdsFor(viewModel.activeStrapId)
+                .flatMap { viewModel.repo.metricSeries(it, key, "0000-01-01", "9999-12-31") }
+                .maxByOrNull { it.day }?.value
+        fitnessAgeToday = runCatching { latestComputed("fitness_age") }.getOrNull()
+        vitalityToday = runCatching { latestComputed("vitality") }.getOrNull()
         // Cache the computed triple + signature so a later re-mount with unchanged data restores them and
         // short-circuits the history-wide read above.
         viewModel.todayStressCache = stressToday
@@ -521,15 +543,16 @@ fun TodayScreen(
     // existing RecoveryDriversSection (gated to the calibration countdown when the night can't score) plus
     // the folded Readiness card (S4). Not persisted, so it reopens closed. Mirrors iOS showChargeBreakdown.
     var showChargeBreakdown by remember { mutableStateOf(false) }
-    // LIVE SESSIONS (beta, default ON): the "Start session" entry under the hero + its full-screen Dialog
+    // LIVE SESSIONS (beta, default ON): the "Start session" entry in the Workouts area + its full-screen Dialog
     // (the same presentation the live-workout overlay / Charge breakdown use — deliberately NOT a nav
     // destination, so dismissing it leaves the session's runner coaching and this entry is the way back
-    // in). Gated on the Settings `live_sessions_beta` flag; SharedPreferences isn't reactive, so it's read
-    // once into local state like the hydration/day-cycle gates above. The ACTIVE runner is also collected
-    // here (null ↔ runner only — the per-second snapshot is scoped inside the entry card) so a running
-    // session keeps its way-back-in card even if the beta flag was just switched off.
+    // in). Gated on the Settings `live_sessions_beta` flag. Read FRESH each composition (not remembered):
+    // the toggle lives on the Settings screen, so a remembered read stayed stale until an app restart —
+    // the beta switch appeared not to work. A fresh read (a cheap pref lookup) means the recomposition on
+    // return from Settings picks up the change. The ACTIVE runner is also collected here (null ↔ runner
+    // only) so a running session keeps its way-back-in card even if the beta flag was just switched off.
     var showLiveSession by remember { mutableStateOf(false) }
-    val liveSessionsEnabled = remember { LiveSessionPrefs.enabled(context) }
+    val liveSessionsEnabled = LiveSessionPrefs.enabled(context)
     val activeLiveSession by LiveSessionRunner.active.collectAsStateWithLifecycle()
     // S4: the Synthesis card collapses to a one-liner that expands on tap (default collapsed). Mirrors iOS.
     var synthesisExpanded by remember { mutableStateOf(false) }
@@ -665,7 +688,14 @@ fun TodayScreen(
     var stepsEstForDay by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(days, selectedDayKey) {
         val byDay = runCatching {
-            viewModel.repo.resolvedSeries("steps_est", "my-whoop", "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: the active strap id belongs in [strapDeviceId], NOT preferredSource —
+            // sourceCandidates only takes its WHOOP branch when preferredSource is the canonical id (or
+            // equals strapDeviceId), and a real id in the preferred slot collapses the candidate list to
+            // that bare id alone, which holds no rows at all. Named argument on purpose.
+            viewModel.repo.resolvedSeries(
+                "steps_est", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         stepsEstForDay = byDay[selectedDayKey]?.let { Math.round(it).toInt() }
@@ -701,7 +731,14 @@ fun TodayScreen(
     var restScoreForDay by remember { mutableStateOf<Double?>(null) }
     LaunchedEffect(days, selectedDayKey, selectedDayOffset) {
         val byDay = runCatching {
-            viewModel.repo.resolvedSeries("sleep_performance", "my-whoop", "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: the active strap id goes in [strapDeviceId] (5th), preferredSource stays
+            // canonical — that is what makes sourceCandidates build the full union
+            // [active, active-noop, my-whoop, my-whoop-noop], so Rest renders across a "Make active" seam.
+            // Passing the real id as preferredSource instead collapses the list to that bare id (no rows).
+            viewModel.repo.resolvedSeries(
+                "sleep_performance", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         // #977: the tail-fallback (latest scored night) is now freshness-gated. A live 5.0 whose sleep never
@@ -723,7 +760,12 @@ fun TodayScreen(
     var restCompositeSpark by remember { mutableStateOf<List<Double>>(emptyList()) }
     LaunchedEffect(days, selectedDay) {
         val byDay = runCatching {
-            viewModel.repo.resolvedSeries("sleep_performance", "my-whoop", "0000-00-00", "9999-99-99")
+            // IDENTITY FUSION: active strap id in [strapDeviceId] (see the Rest-score read above) so the
+            // 14-day sparkline spans a "Make active" seam instead of flat-lining at it.
+            viewModel.repo.resolvedSeries(
+                "sleep_performance", WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                strapDeviceId = viewModel.activeStrapId,
+            )
                 .values.associate { it.first to it.second }
         }.getOrDefault(emptyMap())
         val cutoff = selectedDay.minusDays(13).toString()
@@ -746,8 +788,12 @@ fun TodayScreen(
         val resolved = mutableMapOf<String, String>()
         for (key in listOf("recovery", "sleep_performance")) {
             val win = runCatching {
-                viewModel.repo.resolvedSeries(key, "my-whoop", "0000-00-00", "9999-99-99")
-                    .points.lastOrNull { it.day == selectedDayKey }?.source
+                // IDENTITY FUSION: active strap id in [strapDeviceId], so the badge names the lineage that
+                // actually supplied the day rather than resolving only the canonical pair.
+                viewModel.repo.resolvedSeries(
+                    key, WhoopRepository.WHOOP_SOURCE, "0000-00-00", "9999-99-99",
+                    strapDeviceId = viewModel.activeStrapId,
+                ).points.lastOrNull { it.day == selectedDayKey }?.source
             }.getOrNull()
             if (win != null) resolved[key] = win
         }
@@ -869,10 +915,14 @@ fun TodayScreen(
     // ring having a value (a calibrating / empty ring shows no badge). Null → no badge. Mirrors the Swift
     // Today lane (per-ring SourceBadge from provenanceByMetric, gated by ringHasValue).
     val chargeProvenance = remember(provenanceByMetric, displayMetric) {
-        if (displayMetric?.recovery != null) provenanceByMetric["recovery"]?.let { provenanceDisplayLabel(it) } else null
+        if (displayMetric?.recovery != null) {
+            provenanceByMetric["recovery"]?.let { provenanceDisplayLabel(it, viewModel.activeStrapId) }
+        } else null
     }
     val restProvenance = remember(provenanceByMetric, restScoreForDay) {
-        if (restScoreForDay != null) provenanceByMetric["sleep_performance"]?.let { provenanceDisplayLabel(it) } else null
+        if (restScoreForDay != null) {
+            provenanceByMetric["sleep_performance"]?.let { provenanceDisplayLabel(it, viewModel.activeStrapId) }
+        } else null
     }
 
     // 14-day trailing calendar window ending on the phone's actual local day.
@@ -996,29 +1046,34 @@ fun TodayScreen(
             // shows just "v8.2.6"; preview adds build number and branch@sha so a screenshot
             // identifies the exact build. The wordmark keeps its tap easter egg.
             LiquidWordmark()
-            Text(
-                buildStamp(
-                    channel = BuildConfig.CHANNEL,
-                    versionName = BuildConfig.VERSION_NAME,
-                    versionCode = BuildConfig.VERSION_CODE,
-                    branch = BuildConfig.GIT_BRANCH,
-                    sha = BuildConfig.GIT_SHA,
-                ),
-                style = NoopType.number(9.5f)
-                    .copy(shadow = Shadow(color = Color.Black.copy(alpha = 0.3f), offset = Offset(0f, 1f), blurRadius = 6f)),
-                color = Color.White.copy(alpha = 0.45f),
-                textAlign = TextAlign.Center,
-                // Two lines, not one: a branch preview's stamp ("… · <branch>@<sha>") easily
-                // outgrows one line and maxLines=1 was silently CLIPPING the branch off (leaving a
-                // dangling "·"). The " · " separators are natural wrap points, so the source lands
-                // on its own centred second line; Ellipsis only for pathological lengths.
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 2.dp)
-                    .semantics { contentDescription = "App version" },
-            )
+            // Under-wordmark build stamp — STABLE only. On the preview channel the same string is carried
+            // by the always-on top band ([PreviewChannelBand] in AppRoot), so rendering it here too would
+            // show it twice; gate it out on preview. Stable keeps the calm "v8.2.11" exactly as before.
+            if (BuildConfig.CHANNEL != "preview") {
+                Text(
+                    buildStamp(
+                        channel = BuildConfig.CHANNEL,
+                        versionName = BuildConfig.VERSION_NAME,
+                        versionCode = BuildConfig.VERSION_CODE,
+                        branch = BuildConfig.GIT_BRANCH,
+                        sha = BuildConfig.GIT_SHA,
+                    ),
+                    style = NoopType.number(9.5f)
+                        .copy(shadow = Shadow(color = Color.Black.copy(alpha = 0.3f), offset = Offset(0f, 1f), blurRadius = 6f)),
+                    color = Color.White.copy(alpha = 0.45f),
+                    textAlign = TextAlign.Center,
+                    // Two lines, not one: a branch preview's stamp ("… · <branch>@<sha>") easily
+                    // outgrows one line and maxLines=1 was silently CLIPPING the branch off (leaving a
+                    // dangling "·"). The " · " separators are natural wrap points, so the source lands
+                    // on its own centred second line; Ellipsis only for pathological lengths.
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp)
+                        .semantics { contentDescription = "App version" },
+                )
+            }
             Spacer(Modifier.height(10.dp))
             LiquidTodayHeader(
                 dayTitle = dayTitle,
@@ -1029,7 +1084,9 @@ fun TodayScreen(
                 onSupport = onSupport,
                 onQuickActions = onQuickActions,
                 onOpenSettings = onOpenSettings,
+                onOpenProfile = onOpenProfile,
                 onOpenDevices = onOpenDevices,
+                showSupport = showSupport,
             )
         }
         }
@@ -1134,266 +1191,236 @@ fun TodayScreen(
 
         if (alert != null) item { IllnessBanner(alert!!) }
 
-        // HERO, the three Charge / Effort / Rest score rings, Charge centred + enlarged, floating on a
-        // scenic Charge-tinted backdrop (the WHOOP-style hero, #23). The old big gold RecoveryRing hero and
-        // the "At a glance" header are gone: recovery now reads as the enlarged Charge ring, the Support
-        // heart moved to the scaffold's compact top bar, and the Synthesis card + HRV/RHR/Respiratory rows
-        // re-home below. iOS/macOS parity (TodayView.heroSection). The Effort gauge prefers the live
-        // in-progress strain for today, falling back to the stored value (#402).
-        // Staggered in as the rings hero (index 1, after the header). The ring numbers themselves tick up
-        // via GlowRing's built-in count-up (the Android equivalent of iOS GlowRing's animated `value`).
-        // The day-cycle SCENE now sits at SCREEN level (the scaffold's `topBackground`, behind the header +
-        // these rings + bled full-width up behind the status bar), so the rings float DIRECTLY on the scene
-        // rather than in a card-clipped scene of their own, mirroring iOS, where TodayView moved the scene
-        // to a screen-level `SceneScreenBackground` and the hero dropped `.sceneHeroBackground()`. No
-        // in-card scene here, and no rounded clip (a flat hero on the screen-level backdrop). The Charge
-        // ring value reads WHITE (GlowRing's centre label) with a charge-green arc, matching the iOS source.
-        item {
-        // The liquid hero CARD: a translucent near-black that floats over the day-of-sky so the vessels +
-        // white count-up numbers stay crisp — the card does the contrast work, not a muted sky. A rounded
-        // 26 corner + a faint white hairline give it the frosted-glass edge of the iOS liquid heroCard
-        // (heroFill = rgba(13,14,20,.80), stroke white@0.11). Mirrors the iOS LiquidTodayView heroCard.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(LIQUID_HERO_RADIUS))
-                .background(LIQUID_HERO_FILL)
-                .border(1.dp, Color.White.copy(alpha = 0.11f), RoundedCornerShape(LIQUID_HERO_RADIUS))
-                .staggeredAppear(1),
-        ) {
-            ScoreHeroRow(
-                day = displayMetric,
-                restScore = restScoreForDay,
-                recoveryCalibration = recoveryCalibration,
-                lastScoredCharge = lastScoredCharge,
-                effortScale = effortScale,
-                liveTodayStrain = if (selectedDayOffset == 0) liveTodayStrain else null,
-                chargeProvenance = chargeProvenance,
-                restProvenance = restProvenance,
-                onScoreInfo = openGuide,
-                onChargeTap = { showChargeBreakdown = true },
-            )
-        }
-        }
-
-        // LIVE SESSIONS (beta): the compact "Start session · BETA" entry, directly under the hero. Today
-        // only (offset 0 — a session is a now-thing), gated on the Settings beta flag; a RUNNING session
-        // keeps the card visible regardless (it is the designed way back into the dismissed session dialog,
-        // see LiveSessionRunner's lifetime note). The card swaps itself to "Session running" / "Session
-        // ended" (it scopes the runner's per-second snapshot internally, like WorkoutInProgressCard's clock).
-        if (selectedDayOffset == 0 && (liveSessionsEnabled || activeLiveSession != null)) {
-            item {
-                LiveSessionEntryCard(
-                    onOpen = {
-                        // Only BEGIN when nothing is in flight: an active runner (running, or ended and
-                        // holding its unseen summary) is simply re-presented, never displaced — so a tap
-                        // can't silently discard a running session or a summary awaiting its "Done".
-                        if (LiveSessionRunner.active.value == null) {
-                            startOrResumeLiveSession(viewModel, context)
+        // TODAY SECTIONS — customisable order + visibility (see TodaySections.kt / TodaySectionPrefs).
+        // The seven top-level sections render in the user's saved order; a hidden section is simply not
+        // emitted. The Hero carries its adjacent context cards (Live-session entry + effort-zero note),
+        // so they travel and hide with it. Each section keeps its OWN gates (day 0, data presence) ANDed
+        // with the enabled flag. Edited from Settings → Appearance → Today layout.
+        enabledTodaySections.forEachIndexed { sectionPos, todaySection ->
+            // Stagger the entrance by RENDER position (the header is index 0), so a reordered or
+            // hidden section animates in at its NEW place instead of its old fixed index.
+            val stagger = sectionPos + 1
+            when (todaySection) {
+                TodaySection.HERO -> {
+                    item {
+                    // The liquid hero CARD: a translucent near-black that floats over the day-of-sky so the vessels +
+                    // white count-up numbers stay crisp — the card does the contrast work, not a muted sky. A rounded
+                    // 26 corner + a faint white hairline give it the frosted-glass edge of the iOS liquid heroCard
+                    // (heroFill = rgba(13,14,20,.80), stroke white@0.11). Mirrors the iOS LiquidTodayView heroCard.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(LIQUID_HERO_RADIUS))
+                            .background(LIQUID_HERO_FILL)
+                            .border(1.dp, Palette.heroHairline, RoundedCornerShape(LIQUID_HERO_RADIUS))
+                            .staggeredAppear(stagger),
+                    ) {
+                        ScoreHeroRow(
+                            day = displayMetric,
+                            restScore = restScoreForDay,
+                            recoveryCalibration = recoveryCalibration,
+                            lastScoredCharge = lastScoredCharge,
+                            effortScale = effortScale,
+                            liveTodayStrain = if (selectedDayOffset == 0) liveTodayStrain else null,
+                            chargeProvenance = chargeProvenance,
+                            restProvenance = restProvenance,
+                            onScoreInfo = openGuide,
+                            onChargeTap = { showChargeBreakdown = true },
+                        )
+                    }
+                    }
+                    // Honest "why is Effort 0?" caption (#482/#480), only when today's Effort is a real
+                    // near-zero (HR present but never crossed the cardio zone), so a calm day reads as explained
+                    // rather than broken. Mirrors the iOS effortZeroNote. A low-HR day honestly earns ~0.
+                    // Effort accrues over a day and must never visibly drop: floor the in-progress value at the day's
+                    // already-earned strain (#489/#506). displayMetric for today is today's row or null, never a prior
+                    // day, so this can't resurrect a stale day, it only stops the gauge dropping below what's earned.
+                    item {
+                    val todayEffort = if (selectedDayOffset == 0) {
+                        val live = liveTodayStrain; val stored = displayMetric?.strain
+                        if (live != null && stored != null) maxOf(live, stored) else (live ?: stored)
+                    } else null
+                    if (todayEffort != null && todayEffort < 1.0) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Icon(
+                                Icons.Filled.Info,
+                                contentDescription = null,
+                                tint = Palette.effortColor,
+                                modifier = Modifier.size(Metrics.iconSmall),
+                            )
+                            Text(
+                                "No cardio load yet. Effort builds once your heart rate climbs into your effort " +
+                                    "zone (around 50% of your heart-rate reserve). A calm day honestly reads near zero.",
+                                style = NoopType.footnote,
+                                color = Palette.textTertiary,
+                            )
                         }
-                        showLiveSession = true
-                    },
-                )
+                    }
+                    }
+                }
+                TodaySection.HEART_RATE -> {
+                    item {
+                    // #991: HeartRateTrendCard emits its SectionHeader + card as two siblings; a Box overlaid them
+                    // (the header showed THROUGH the card in the v8 layout). A spaced Column stacks them instead.
+                    Column(
+                        modifier = Modifier.fillMaxWidth().staggeredAppear(stagger),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        HeartRateTrendCard(viewModel, days, selectedDay, todayDate, displayMetric, effortScale)
+                    }
+                    }
+                }
+                TodaySection.YOUR_CARDS -> {
+                    item {
+                    val visibleDashboardCards = enabledDashboardCards.filter {
+                        it != DashboardCard.HYDRATION || hydrationEnabled
+                    }
+                    if (selectedDayOffset == 0 && visibleDashboardCards.isNotEmpty()) {
+                        YourCardsSection(
+                            cards = visibleDashboardCards,
+                            day = displayMetric,
+                            // The SAME carried-over last-scored row the OLD hero vital rows + Key-Metrics tiles read
+                            // (#543): right after the logical-day rollover today's row carries no vitals yet, so without
+                            // this the HRV / Resting HR / Respiratory / SpO₂ / Sleep cards all blank to "No Data" while
+                            // the rest of Today shows last night's carried values. Routing the cards through the same
+                            // `carriedDay ?: day` source the HeroMetricRows + MetricGrid already use brings them to parity.
+                            carriedDay = lastScoredRecoveryDay,
+                            // The recovery-INDEPENDENT vitals carry (#543 follow-up): the overnight HRV / Resting HR /
+                            // Respiratory cards read PER-FIELD today-first with THIS fallback, so a night whose recovery
+                            // was nulled post-update still surfaces its OWN preserved vitals (not an older scored day's).
+                            vitalsDay = lastVitalsDay,
+                            days = days,
+                            colourVitalsByState = colourVitalsByState,
+                            stress = stressToday,
+                            fitnessAge = fitnessAgeToday,
+                            vitality = vitalityToday,
+                            importedStepsForDay = importedStepsForDay,
+                            estimatedStepsForDay = stepsEstForDay,
+                            latestActiveKcal = latestActiveKcal,
+                            hydrationTotalMl = hydrationTotalMl,
+                            hydrationGoalMl = hydrationGoalMl,
+                            onOpenHydration = onOpenHydration,
+                            onOpenStress = onOpenStress,
+                            onOpenMetric = onOpenMetric,
+                            onOpenSleep = onOpenSleep,
+                            onOpenCoupled = onOpenCoupled,
+                            onCustomise = { showDashboardEditor = true },
+                        )
+                    }
+                    }
+                }
+                TodaySection.SYNTHESIS -> {
+                    item {
+                    Box(modifier = Modifier.fillMaxWidth().staggeredAppear(stagger)) {
+                        SynthesisHeroCard(
+                            day = displayMetric,
+                            recoveryCalibration = recoveryCalibration,
+                            carriedDay = lastScoredRecoveryDay,
+                            days = days,
+                            synthesisExpanded = synthesisExpanded,
+                            onToggleSynthesis = { synthesisExpanded = !synthesisExpanded },
+                            onOpenReadiness = { showChargeBreakdown = true },
+                        )
+                    }
+                    }
+                }
+                TodaySection.RECOVERY_VITALS -> {
+                    item {
+                    Box(modifier = Modifier.fillMaxWidth().staggeredAppear(stagger)) {
+                        HeroMetricRows(day = displayMetric, carriedDay = lastScoredRecoveryDay, vitalsDay = lastVitalsDay, days = days, colourVitalsByState = colourVitalsByState)
+                    }
+                    }
+                }
+                TodaySection.KEY_METRICS -> {
+                    item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.weight(1f)) {
+                            SectionHeader("Key Metrics", overline = dayLabel, trailing = "14-day trend")
+                        }
+                        TextButton(
+                            onClick = { showMetricsEditor = true },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Palette.accent),
+                        ) {
+                            Icon(
+                                Icons.Filled.Tune,
+                                contentDescription = "Edit Key Metrics",
+                                modifier = Modifier.size(Metrics.iconSmall),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Edit", style = NoopType.footnote)
+                        }
+                    }
+                    }
+                    item {
+                    Box(modifier = Modifier.fillMaxWidth().staggeredAppear(stagger)) {
+                        MetricGrid(
+                            d = displayMetric,
+                            w = window,
+                            recoveryCalibration = recoveryCalibration,
+                            lastScoredCharge = lastScoredCharge,
+                            carriedDay = lastScoredRecoveryDay,
+                            vitalsDay = lastVitalsDay,
+                            unitSystem = unitSystem,
+                            effortScale = effortScale,
+                            latestWeightKg = weightKg,
+                            profileWeightKg = profileWeightKg,
+                            latestActiveKcal = latestActiveKcal,
+                            importedStepsForDay = importedStepsForDay,
+                            estimatedStepsForDay = stepsEstForDay,
+                            stepActivityClassForDay = stepActivityClassForDay,
+                            stepsEstimateCaption = stepsEstimateCaption(profileStore),
+                            restScore = restScoreForDay,
+                            restSpark = restCompositeSpark,
+                            enabledMetrics = enabledKeyMetrics,
+                            days = days,
+                            colourVitalsByState = colourVitalsByState,
+                            isToday = selectedDayOffset == 0,
+                            onScoreInfo = openGuide,
+                            onOpenMetric = onOpenMetric,
+                            metricsExpanded = metricsExpanded,
+                            onToggleMetrics = { metricsExpanded = !metricsExpanded },
+                        )
+                    }
+                    }
+                }
+                TodaySection.WORKOUTS -> {
+                    // LIVE SESSIONS (beta): the compact "Start session · BETA" entry, at the top of the Workouts
+                    // area (moved here from under the hero — a session becomes a workout). Today only (offset 0 —
+                    // a session is a now-thing), gated on the Settings beta flag; a RUNNING session
+                    // keeps the card visible regardless (it is the designed way back into the dismissed session dialog,
+                    // see LiveSessionRunner's lifetime note). The card swaps itself to "Session running" / "Session
+                    // ended" (it scopes the runner's per-second snapshot internally, like WorkoutInProgressCard's clock).
+                    if (selectedDayOffset == 0 && (liveSessionsEnabled || activeLiveSession != null)) {
+                        item {
+                            LiveSessionEntryCard(
+                                onOpen = {
+                                    // Only BEGIN when nothing is in flight: an active runner (running, or ended and
+                                    // holding its unseen summary) is simply re-presented, never displaced — so a tap
+                                    // can't silently discard a running session or a summary awaiting its "Done".
+                                    if (LiveSessionRunner.active.value == null) {
+                                        startOrResumeLiveSession(viewModel, context)
+                                    }
+                                    showLiveSession = true
+                                },
+                            )
+                        }
+                    }
+                    item {
+                    // #991: same fix as the HR card — TodayWorkoutsSection emits header + card as two siblings, so a
+                    // Box overlaid them. Stack them in a spaced Column.
+                    Column(
+                        modifier = Modifier.fillMaxWidth().staggeredAppear(stagger),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        TodayWorkoutsSection(footer.recentWorkouts)
+                    }
+                    }
+                }
             }
-        }
-
-        // HEART RATE, the live HR thread / trend card, directly under the hero — the SAME order as the iOS
-        // liquid Today (scene → heartRateSection → yourCardsSection). It carries its own live-HR thread + the
-        // banked 5-minute fallback + the "connect your strap" empty state, all self-contained (its own data
-        // loads), so moving it up here is a pure re-order that preserves every binding. Mirrors iOS
-        // heartRateSection sitting first after the hero.
-        item {
-        // #991: HeartRateTrendCard emits its SectionHeader + card as two siblings; a Box overlaid them
-        // (the header showed THROUGH the card in the v8 layout). A spaced Column stacks them instead.
-        Column(
-            modifier = Modifier.fillMaxWidth().staggeredAppear(5),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            HeartRateTrendCard(viewModel, days, selectedDay, todayDate, displayMetric, effortScale)
-        }
-        }
-
-        // YOUR CARDS, the user-customisable dashboard (WHOOP "My Dashboard"). Surfaces a persisted,
-        // reorderable selection of metric cards as flat WHOOP metric rows (leading icon + UPPERCASE label +
-        // sublabel on the left, big value + unit + chevron on the right). Default = Stress / Fitness age /
-        // Vitality + HRV + Resting HR. TODAY only; a card with no value yet renders a dash rather than
-        // vanishing. The "CUSTOMISE" link opens a local toggle/reorder dialog. Mirrors iOS yourCardsSection.
-        // When Hydration tracking is OFF the card is hidden even if it sits in the saved selection (the
-        // editor still offers it, so the choice persists), keeping the opt-in feature fully invisible until
-        // enabled. Mirrors the iOS yourCardsSection hydration gate.
-        item {
-        val visibleDashboardCards = enabledDashboardCards.filter {
-            it != DashboardCard.HYDRATION || hydrationEnabled
-        }
-        if (selectedDayOffset == 0 && visibleDashboardCards.isNotEmpty()) {
-            YourCardsSection(
-                cards = visibleDashboardCards,
-                day = displayMetric,
-                // The SAME carried-over last-scored row the OLD hero vital rows + Key-Metrics tiles read
-                // (#543): right after the logical-day rollover today's row carries no vitals yet, so without
-                // this the HRV / Resting HR / Respiratory / SpO₂ / Sleep cards all blank to "No Data" while
-                // the rest of Today shows last night's carried values. Routing the cards through the same
-                // `carriedDay ?: day` source the HeroMetricRows + MetricGrid already use brings them to parity.
-                carriedDay = lastScoredRecoveryDay,
-                // The recovery-INDEPENDENT vitals carry (#543 follow-up): the overnight HRV / Resting HR /
-                // Respiratory cards read PER-FIELD today-first with THIS fallback, so a night whose recovery
-                // was nulled post-update still surfaces its OWN preserved vitals (not an older scored day's).
-                vitalsDay = lastVitalsDay,
-                stress = stressToday,
-                fitnessAge = fitnessAgeToday,
-                vitality = vitalityToday,
-                importedStepsForDay = importedStepsForDay,
-                estimatedStepsForDay = stepsEstForDay,
-                latestActiveKcal = latestActiveKcal,
-                hydrationTotalMl = hydrationTotalMl,
-                hydrationGoalMl = hydrationGoalMl,
-                onOpenHydration = onOpenHydration,
-                onOpenStress = onOpenStress,
-                onOpenMetric = onOpenMetric,
-                onOpenSleep = onOpenSleep,
-                onOpenCoupled = onOpenCoupled,
-                onCustomise = { showDashboardEditor = true },
-            )
-        }
-        }
-
-        // The plain-English read-out, the Charge-tinted Synthesis card with a WHITE headline, carries the
-        // greeting + the SOLID/CALIBRATING data-confidence pill in its top-right. Mirrors the iOS Synthesis
-        // InsightCard. Carries the last scored day's read at the rollover (#543) so it doesn't blank to
-        // "No Data". Staggered in as index 2.
-        item {
-        Box(modifier = Modifier.fillMaxWidth().staggeredAppear(2)) {
-            SynthesisHeroCard(
-                day = displayMetric,
-                recoveryCalibration = recoveryCalibration,
-                carriedDay = lastScoredRecoveryDay,
-                days = days,
-                synthesisExpanded = synthesisExpanded,
-                onToggleSynthesis = { synthesisExpanded = !synthesisExpanded },
-                onOpenReadiness = { showChargeBreakdown = true },
-            )
-        }
-        }
-
-        // Provenance (COMPONENT 4) now rides UNDER each hero ring as a per-metric badge (Charge names the
-        // recovery winner, Rest names the sleep_performance winner), resolved field-by-field per
-        // WhoopRepository.mergeDaily, so an imported metric on an otherwise-computed day is labelled
-        // honestly rather than under one blanket day-level deviceId. See ScoreHeroRow + HeroRingColumn.
-        // Mirrors the iOS Today lane, which badges each ring's real winner and has no separate day badge.
-
-        // Honest "why is Effort 0?" caption (#482/#480), only when today's Effort is a real
-        // near-zero (HR present but never crossed the cardio zone), so a calm day reads as explained
-        // rather than broken. Mirrors the iOS effortZeroNote. A low-HR day honestly earns ~0.
-        // Effort accrues over a day and must never visibly drop: floor the in-progress value at the day's
-        // already-earned strain (#489/#506). displayMetric for today is today's row or null, never a prior
-        // day, so this can't resurrect a stale day, it only stops the gauge dropping below what's earned.
-        item {
-        val todayEffort = if (selectedDayOffset == 0) {
-            val live = liveTodayStrain; val stored = displayMetric?.strain
-            if (live != null && stored != null) maxOf(live, stored) else (live ?: stored)
-        } else null
-        if (todayEffort != null && todayEffort < 1.0) {
-            Row(
-                modifier = Modifier.padding(horizontal = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Icon(
-                    Icons.Filled.Info,
-                    contentDescription = null,
-                    tint = Palette.effortColor,
-                    modifier = Modifier.size(Metrics.iconSmall),
-                )
-                Text(
-                    "No cardio load yet. Effort builds once your heart rate climbs into your effort " +
-                        "zone (around 50% of your heart-rate reserve). A calm day honestly reads near zero.",
-                    style = NoopType.footnote,
-                    color = Palette.textTertiary,
-                )
-            }
-        }
-        }
-
-        // The three hero vitals, HRV / Resting HR / Respiratory, re-homed below the ring hero now that
-        // the big RecoveryRing card (which used to carry them) is gone. Mirrors the iOS metric rows.
-        // Carries the last scored day's vitals (with a "Last night · <date>" footnote) at the rollover so
-        // they don't blank to "No Data" while live HR ticks (#543). Staggered in as index 3.
-        item {
-        Box(modifier = Modifier.fillMaxWidth().staggeredAppear(3)) {
-            HeroMetricRows(day = displayMetric, carriedDay = lastScoredRecoveryDay, vitalsDay = lastVitalsDay)
-        }
-        }
-
-        // A1/S4: the WHAT SHAPED IT breakdown, the Contributors bars and the READINESS card all folded into
-        // the Charge-ring TAP (the showChargeBreakdown dialog below), collapsing the home screen. They are
-        // NOT deleted, only moved behind a tap; a one-word readiness read (Push / Maintain / Rest, #205)
-        // stays on the hero via SynthesisHeroCard. Mirrors the iOS chargeBreakdownSheet + readiness fold.
-
-        // METRICS, uniform tile grid (two columns), each tile with a 14-day sparkline.
-        // #765: no ad-hoc Spacer row before this header. The lone `selectorTopUp` spacer here (a device the
-        // Health/Sleep screens use to tug a SEGMENTED SELECTOR up toward the section above) had no selector
-        // to tug on Today; it just injected an extra gap that, on top of the scaffold's per-row spacing on
-        // both sides of the spacer item, made the gap before Key Metrics visibly larger than every other
-        // inter-card gap. Removing it lets Key Metrics sit on the SAME shared screenRowSpacing as the rest.
-        // Section header + an Edit affordance to open the local layout editor (#251). No new nav
-        // destination, a dialog over Today. The Box lets the SectionHeader keep its trailing label while
-        // the Edit control sits to its right.
-        item {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.weight(1f)) {
-                SectionHeader("Key Metrics", overline = dayLabel, trailing = "14-day trend")
-            }
-            TextButton(
-                onClick = { showMetricsEditor = true },
-                colors = ButtonDefaults.textButtonColors(contentColor = Palette.accent),
-            ) {
-                Icon(
-                    Icons.Filled.Tune,
-                    contentDescription = "Edit Key Metrics",
-                    modifier = Modifier.size(Metrics.iconSmall),
-                )
-                Spacer(Modifier.width(4.dp))
-                Text("Edit", style = NoopType.footnote)
-            }
-        }
-        }
-        // Key Metrics grid, HR trend and Workouts each stagger in as the lower main sections (indices 4–6),
-        // mirroring iOS's `.staggeredAppear` on metricsSection / heartRateTrendSection / workoutsSection.
-        item {
-        Box(modifier = Modifier.fillMaxWidth().staggeredAppear(4)) {
-            MetricGrid(
-                d = displayMetric,
-                w = window,
-                recoveryCalibration = recoveryCalibration,
-                lastScoredCharge = lastScoredCharge,
-                carriedDay = lastScoredRecoveryDay,
-                unitSystem = unitSystem,
-                effortScale = effortScale,
-                latestWeightKg = weightKg,
-                profileWeightKg = profileWeightKg,
-                importedStepsForDay = importedStepsForDay,
-                estimatedStepsForDay = stepsEstForDay,
-                stepActivityClassForDay = stepActivityClassForDay,
-                stepsEstimateCaption = stepsEstimateCaption(profileStore),
-                restScore = restScoreForDay,
-                restSpark = restCompositeSpark,
-                enabledMetrics = enabledKeyMetrics,
-                isToday = selectedDayOffset == 0,
-                onScoreInfo = openGuide,
-                metricsExpanded = metricsExpanded,
-                onToggleMetrics = { metricsExpanded = !metricsExpanded },
-            )
-        }
-        }
-        item {
-        // #991: same fix as the HR card — TodayWorkoutsSection emits header + card as two siblings, so a
-        // Box overlaid them. Stack them in a spaced Column.
-        Column(
-            modifier = Modifier.fillMaxWidth().staggeredAppear(6),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TodayWorkoutsSection(footer.recentWorkouts)
-        }
         }
         // Auto-detect workouts (MVP, opt-in, default OFF), a NON-DESTRUCTIVE "looks like a workout?"
         // card that suggests logging a detected sustained-elevated-HR bout. Renders nothing when the
@@ -1401,12 +1428,12 @@ fun TodayScreen(
         if (selectedDayOffset == 0) {
             item { AutoWorkoutNudgeCard(viewModel = viewModel, days = days) }
         }
-        // Honest, dismissible 12-hourly donation ask, a card in the flow, never a dialog.
-        item { DonationNudgeCard() }
+        // Honest, dismissible 12-hourly donation ask, a card in the flow, never a dialog. Hidden with the
+        // rest of support/donation when the Settings toggle is off.
+        if (showSupport) item { DonationNudgeCard() }
         // Support, an in-content card (heart.fill in metricRose, "Donate or get in touch, totally
-        // optional.", chevron). The Support heart left the header cluster for parity with iOS, where
-        // Support is an in-flow supportRow near the donation nudge (still reachable via More → Support).
-        item { SupportRow(onSupport = onSupport) }
+        // optional.", chevron). Hidden with the rest of support/donation when the Settings toggle is off.
+        if (showSupport) item { SupportRow(onSupport = onSupport) }
         // Strap battery only while the link is up AND a real reading exists, a stale % from a
         // dropped connection must not present as live (#159).
         item {
@@ -1604,7 +1631,7 @@ private fun WorkoutInProgressCard(
 }
 
 /**
- * The compact Live Sessions entry under the hero ("Start session · BETA"). Three honest states off the
+ * The compact Live Sessions entry in the Workouts area ("Start session · BETA"). Three honest states off the
  * process-wide [LiveSessionRunner.active]: no session → start affordance; session running → the way back
  * into the dismissed session dialog (with a live elapsed clock); session ended but its summary not yet
  * Done-dismissed → "See the summary". The runner's 1 Hz snapshot is collected INSIDE this card only, so
@@ -1728,6 +1755,35 @@ private fun QuickActionDisc(onClick: () -> Unit) {
             contentDescription = null,
             tint = Color.White,
             modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+/** The Today-header Settings gear — a direct hop to Settings. Styled like [QuickActionDisc] / the battery
+ *  ring (a translucent-white liquid disc + a crisp white glyph) so it reads on the day-of-sky and fits the
+ *  liquid header cluster across every theme, rather than a flat grey icon that only suits some palettes. */
+@Composable
+private fun SettingsDisc(onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .liquidPress(interaction)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.16f))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick,
+            )
+            .semantics { contentDescription = "Settings" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.Settings,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(18.dp),
         )
     }
 }
@@ -1884,7 +1940,9 @@ private fun LiquidTodayHeader(
     onSupport: () -> Unit,
     onQuickActions: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenProfile: () -> Unit,
     onOpenDevices: () -> Unit,
+    showSupport: Boolean,
     modifier: Modifier = Modifier,
 ) {
     var showPicker by remember { mutableStateOf(false) }
@@ -1957,15 +2015,19 @@ private fun LiquidTodayHeader(
             )
         }
 
-        // RIGHT: the iOS four controls, in order — heart · avatar · + · battery ring. Each ~34dp, 8dp apart.
+        // RIGHT: the header controls, in order — heart · avatar · settings gear · + · battery ring. Each
+        // ~34dp, 8dp apart. The heart hides when support/donation is off; the gear is a direct hop to Settings.
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             // (a) Support / donate heart — a filled heart in the charge-green tint (iOS chargeColor). Choop is
-            // free forever; donations are optional. Mirrors iOS `heart.fill` → showSupport.
-            HeaderHeartButton(onSupport = onSupport)
-            // (b) Profile avatar (the photo set in Settings, or the Choop loop mark) → Settings. Mirrors iOS.
+            // free forever; donations are optional. Hidden when the support/donation surfaces are turned
+            // off (Settings → Appearance → "Show support & donation").
+            if (showSupport) {
+                HeaderHeartButton(onSupport = onSupport)
+            }
+            // (b) Profile avatar (the photo set on the Profile page, or the Choop loop mark) → Profile.
             Box(
                 modifier = Modifier
                     .size(34.dp)
@@ -1973,13 +2035,17 @@ private fun LiquidTodayHeader(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                        onClick = onOpenSettings,
+                        onClick = onOpenProfile,
                     )
-                    .semantics { contentDescription = "Profile and settings" },
+                    .semantics { contentDescription = "Profile" },
                 contentAlignment = Alignment.Center,
             ) {
                 ProfileAvatar(size = 34.dp)
             }
+            // (b2) Settings gear — a direct one-tap into Settings from the Today header, so you don't have to
+            // go via Profile or More. Pairs with the avatar: avatar → Profile, gear → Settings. Styled like
+            // the + / battery disc so it matches the liquid header across every theme (see SettingsDisc).
+            SettingsDisc(onClick = onOpenSettings)
             // (c) Quick-add (+), the accented primary. Mirrors iOS's LiquidAddButton (a glyph on a translucent
             // disc → the quick-actions menu). Sized 34dp to match the rest of the liquid cluster.
             QuickActionDisc(onClick = onQuickActions)
@@ -2031,8 +2097,11 @@ private fun LiquidBatteryRing(batteryPct: Double?, onClick: () -> Unit) {
             .size(34.dp)
             .liquidPress(interaction)
             .clip(CircleShape)
-            // A translucent near-black disc + faint white rim, matching iOS (rgba(10,11,16,.5) + white@.15).
-            .background(Color(red = 10f / 255f, green = 11f / 255f, blue = 16f / 255f, alpha = 0.5f))
+            // A translucent theme-tinted DARK glass disc + faint white rim. It stays dark in BOTH schemes
+            // (the family's dark hero-glass hue) — unlike Palette.heroFill which goes light in a light
+            // theme — because the ring + white battery % inside it need a dark ground to read on the
+            // (now light-in-light-mode) day-cycle sky. iOS used a fixed rgba(10,11,16,.5); this hues it.
+            .background(ThemePrefs.family.heroFill.copy(alpha = 0.5f))
             .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape)
             .clickable(
                 interactionSource = interaction,
@@ -2755,16 +2824,25 @@ private fun RingNeedsTrackedNight() {
  *  card to the Key-Metrics tiles, which already read per-field. Each row still falls through to "No Data"
  *  for a vital neither today nor the carry supplies. */
 @Composable
-private fun HeroMetricRows(day: DailyMetric?, carriedDay: DailyMetric? = null, vitalsDay: DailyMetric? = null) {
+private fun HeroMetricRows(
+    day: DailyMetric?,
+    carriedDay: DailyMetric? = null,
+    vitalsDay: DailyMetric? = null,
+    days: List<DailyMetric> = emptyList(),
+    colourVitalsByState: Boolean = false,
+) {
     // Per-field, today-first: today's own value wins; the vitals carry only fills a field today lacks.
-    val hrv = day?.avgHrv ?: vitalsDay?.avgHrv
-    val rhr = day?.restingHr ?: vitalsDay?.restingHr
-    val resp = day?.respRateBpm ?: vitalsDay?.respRateBpm
+    // Resolved through the shared [MetricReads] so the vitals card, the Key-Metrics tile and the Your-cards
+    // row can no longer disagree on the field / rounding / fill maths (only the carry ROW differs per
+    // surface; here it's [vitalsDay], the recovery-independent carry — see MetricReads' header).
+    val hrv = MetricReads.hrv(day, vitalsDay)
+    val rhr = MetricReads.restingHr(day, vitalsDay)
+    val resp = MetricReads.respiratory(day, vitalsDay)
     // The caption reflects the row the shown vitals actually came from: if today supplied ANY of them the
     // values are today's own, so don't stamp them as a prior "Last night · <date>"; only when EVERY shown
     // vital is carried do we stamp the carry's date (relabelled "Latest sleep · <date>" when weeks-old).
     val carriedFromVitals = day?.avgHrv == null && day?.restingHr == null && day?.respRateBpm == null &&
-        (hrv != null || rhr != null || resp != null) && vitalsDay != null
+        (hrv.hasValue || rhr.hasValue || resp.hasValue) && vitalsDay != null
     // iOS `recoveryVitalsSection`: a frosted card with a "RECOVERY VITALS" header + a "last night · <date>"
     // on the right, then three `vitalRow`s (26dp mini LIQUID VESSEL + label + value). NoopCard supplies the
     // same neutral surfaceRaised + hairline as iOS's frosted card. Inner spacing 12, matching iOS.
@@ -2784,21 +2862,21 @@ private fun HeroMetricRows(day: DailyMetric?, carriedDay: DailyMetric? = null, v
             }
             HeroVitalRow(
                 label = "Heart-rate variability",
-                value = hrv?.let { "${it.roundToInt()} ms" } ?: NO_DATA,
-                tint = Palette.metricCyan,
-                fraction = hrv?.let { (it / 120.0).coerceIn(0.0, 1.0) },
+                value = hrv.number?.let { "$it ${hrv.unit}" } ?: NO_DATA,
+                tint = VitalStatus.color("hrv", day ?: vitalsDay, days, Palette.metricCyan, colourVitalsByState),
+                fraction = hrv.frac,
             )
             HeroVitalRow(
                 label = "Resting heart rate",
-                value = rhr?.let { "$it bpm" } ?: NO_DATA,
-                tint = Palette.metricRose,
-                fraction = rhr?.let { (it / 100.0).coerceIn(0.0, 1.0) },
+                value = rhr.number?.let { "$it ${rhr.unit}" } ?: NO_DATA,
+                tint = VitalStatus.color("rhr", day ?: vitalsDay, days, Palette.metricRose, colourVitalsByState),
+                fraction = rhr.frac,
             )
             HeroVitalRow(
                 label = "Breaths per minute",
-                value = resp?.let { String.format(Locale.US, "%.1f rpm", it) } ?: NO_DATA,
-                tint = Palette.accent,
-                fraction = resp?.let { (it / 24.0).coerceIn(0.0, 1.0) },
+                value = resp.number?.let { "$it ${resp.unit}" } ?: NO_DATA,
+                tint = VitalStatus.color("resp", day ?: vitalsDay, days, Palette.accent, colourVitalsByState),
+                fraction = resp.frac,
             )
         }
     }
@@ -2851,6 +2929,10 @@ private fun YourCardsSection(
     day: DailyMetric?,
     carriedDay: DailyMetric?,
     vitalsDay: DailyMetric?,
+    // History for the vital cards' personal-baseline banding (green→amber→red), shared with the tiles.
+    days: List<DailyMetric>,
+    // The "colour Today vitals by state" setting (default off → identity tints).
+    colourVitalsByState: Boolean,
     stress: Double?,
     fitnessAge: Double?,
     vitality: Double?,
@@ -2917,8 +2999,14 @@ private fun YourCardsSection(
                         vitality = vitality,
                         importedStepsForDay = importedStepsForDay,
                         estimatedStepsForDay = estimatedStepsForDay,
+                        latestActiveKcal = latestActiveKcal,
                     ),
-                    tint = dashboardCardTint(card),
+                    // Vital cards colour by STATE (green→amber→red vs your baseline), like the tiles + Vital
+                    // Signs; non-vitals keep their identity tint. A non-vital / no-reading key bands to null
+                    // → falls back to dashboardCardTint(card).
+                    tint = dashboardCardMetricKey(card)
+                        ?.let { key -> VitalStatus.color(key, day ?: vitalsDay, days, dashboardCardTint(card), colourVitalsByState) }
+                        ?: dashboardCardTint(card),
                     // #706/#684: every card now opens its OWN detail, matching iOS. The Stress card -> Stress;
                     // the overnight vitals (HRV / Resting HR / Respiratory / SpO₂ / Skin Temp) + Fitness age /
                     // Vitality / Steps / Calories -> each metric's focused trend (vital_detail/<key>, the iOS
@@ -3024,6 +3112,7 @@ private fun dashboardCardFraction(
     vitality: Double?,
     importedStepsForDay: Int?,
     estimatedStepsForDay: Int?,
+    latestActiveKcal: Double? = null,
 ): Double? {
     fun over(v: Double?, ceiling: Double): Double? = v?.let { (it / ceiling).coerceIn(0.0, 1.0) }
     val vd = carriedDay ?: day
@@ -3031,17 +3120,20 @@ private fun dashboardCardFraction(
         DashboardCard.STRESS -> over(stress, 3.0)
         DashboardCard.FITNESS_AGE -> if (fitnessAge != null) 0.5 else null
         DashboardCard.VITALITY -> over(vitality, 100.0)
-        DashboardCard.HRV -> over(day?.avgHrv ?: vitalsDay?.avgHrv, 120.0)
-        DashboardCard.RESTING_HR -> over((day?.restingHr ?: vitalsDay?.restingHr)?.toDouble(), 100.0)
-        DashboardCard.RESPIRATORY -> over(day?.respRateBpm ?: vitalsDay?.respRateBpm, 24.0)
-        DashboardCard.STEPS -> {
-            val steps = (day?.steps ?: importedStepsForDay ?: estimatedStepsForDay)?.toDouble()
-            over(steps, 10000.0)
-        }
+        // Same shared reads as the row VALUE above, so the vessel fill and the number can't disagree.
+        DashboardCard.HRV -> MetricReads.hrv(day, vitalsDay).frac
+        DashboardCard.RESTING_HR -> MetricReads.restingHr(day, vitalsDay).frac
+        DashboardCard.RESPIRATORY -> MetricReads.respiratory(day, vitalsDay).frac
+        DashboardCard.STEPS ->
+            MetricReads.stepsFrac(MetricReads.stepsResolved(day?.steps, importedStepsForDay, estimatedStepsForDay))
         DashboardCard.SLEEP -> over(vd?.totalSleepMin, 480.0)
         DashboardCard.COUPLED -> 0.6
+        // Calories now carries a real read (day estimate ?: imported latest), so its vessel fills to match the
+        // shown number and the Key-Metrics tile — no longer an empty vessel beside a real value.
+        DashboardCard.CALORIES ->
+            MetricReads.caloriesFrac(MetricReads.caloriesResolved(day?.activeKcalEst, latestActiveKcal))
         // Not wired to a real read yet — an EMPTY vessel (not half-full) so it doesn't imply a reading.
-        DashboardCard.BLOOD_OXYGEN, DashboardCard.SKIN_TEMP, DashboardCard.CALORIES,
+        DashboardCard.BLOOD_OXYGEN, DashboardCard.SKIN_TEMP,
         DashboardCard.HYDRATION -> null
     }
 }
@@ -3080,26 +3172,27 @@ private fun dashboardCardValue(
     val vd = carriedDay ?: day
 
     return when (card) {
-        DashboardCard.HRV ->
-            withUnit((day?.avgHrv ?: vitalsDay?.avgHrv)?.let { it.roundToInt().toString() } ?: NO_DATA)
-        DashboardCard.RESTING_HR ->
-            withUnit((day?.restingHr ?: vitalsDay?.restingHr)?.toString() ?: NO_DATA)
-        DashboardCard.RESPIRATORY ->
-            withUnit((day?.respRateBpm ?: vitalsDay?.respRateBpm)?.let { String.format(Locale.US, "%.1f", it) } ?: NO_DATA)
+        // The three overnight vitals resolve through the shared [MetricReads] (the recovery-independent
+        // [vitalsDay] carry), so the card's number always agrees with the vitals card + Key-Metrics tile.
+        // withUnit still appends card.unit, which equals the read's own unit for these three.
+        DashboardCard.HRV -> withUnit(MetricReads.hrv(day, vitalsDay).number ?: NO_DATA)
+        DashboardCard.RESTING_HR -> withUnit(MetricReads.restingHr(day, vitalsDay).number ?: NO_DATA)
+        DashboardCard.RESPIRATORY -> withUnit(MetricReads.respiratory(day, vitalsDay).number ?: NO_DATA)
         DashboardCard.BLOOD_OXYGEN ->
-            vd?.spo2Pct?.let { String.format(Locale.US, "%.0f%%", it) } ?: NO_DATA
+            // vd = carriedDay ?: day (recovery-gated); shared "%.0f" format, joined inline as "97%".
+            MetricReads.bloodOxygen(vd, null).number?.let { "$it%" } ?: NO_DATA
         DashboardCard.SKIN_TEMP ->
             // Stored as a deviation from baseline (°C); show it signed so +/- reads honestly.
             vd?.skinTempDevC?.let { String.format(Locale.US, "%+.1f°", it) } ?: NO_DATA
         DashboardCard.SLEEP -> sleepValue(vd)
-        DashboardCard.STEPS -> {
-            val real = day?.steps?.let { intStringGrouped(it.toDouble()) }
-                ?: importedStepsForDay?.let { intStringGrouped(it.toDouble()) }
-            val est = estimatedStepsForDay?.let { intStringGrouped(it.toDouble()) }
-            real ?: est ?: NO_DATA
-        }
+        DashboardCard.STEPS ->
+            // Same precedence as the tile (via MetricReads); grouped format is this row's own.
+            MetricReads.stepsResolved(day?.steps, importedStepsForDay, estimatedStepsForDay)
+                ?.let { intStringGrouped(it.toDouble()) } ?: NO_DATA
         DashboardCard.CALORIES ->
-            withUnit(latestActiveKcal?.let { intStringGrouped(it) } ?: NO_DATA)
+            // Day estimate first, imported Apple/HC latest as fallback (shared with the Key-Metrics tile), so
+            // a strap-only setup no longer reads "No Data" here while the tile shows a real value.
+            withUnit(MetricReads.caloriesResolved(day?.activeKcalEst, latestActiveKcal)?.let { intStringGrouped(it) } ?: NO_DATA)
         DashboardCard.STRESS ->
             // #706/#684: Stress is baseline-relative, so until the strap has banked enough worn nights to
             // seed the 30-day RHR/HRV baseline StressScreen reads, the front card has no number to show. The
@@ -4131,7 +4224,12 @@ internal fun provenanceDisplayLabel(
     rawSource: String,
     deviceId: String = WhoopRepository.WHOOP_SOURCE,
 ): String {
-    if (rawSource == "$deviceId-noop") return "On-device"
+    // IDENTITY FUSION: ANY "<id>-noop" is a Choop-computed strap sibling, not just the active id's own.
+    // After a "Make active" onto a strap's REAL id the two lineages ("my-whoop-noop" and
+    // "whoop-<mac>-noop") both supply days, and the exact-match test labelled the non-active one with the
+    // grey "Whoop" fallback — claiming an import that never happened. The "-noop" suffix is the engine's
+    // private write namespace (nothing else in the store ends in it), so the suffix test is exact enough.
+    if (rawSource.endsWith("-noop")) return "On-device"
     if (rawSource == deviceId || rawSource == WhoopRepository.WHOOP_SOURCE) return "Whoop"
     if (rawSource == WhoopRepository.APPLE_HEALTH_SOURCE) return "Apple Health"
     // Fall back to the FusionSource display name for any other known source; else the raw id verbatim.
@@ -4166,10 +4264,17 @@ private fun MetricGrid(
     recoveryCalibration: Int? = null,
     lastScoredCharge: LastCharge? = null,
     carriedDay: DailyMetric? = null,
+    // The recovery-INDEPENDENT vitals carry (#543). The three overnight vitals read against THIS, matching
+    // the vitals card + Your-cards row, so a night whose recovery was nulled still surfaces its OWN preserved
+    // HRV / Resting HR / Respiratory instead of an older recovery-scored day's. SpO₂ stays on [carriedDay].
+    vitalsDay: DailyMetric? = null,
     unitSystem: UnitSystem = UnitSystem.METRIC,
     effortScale: EffortScale = EffortScale.HUNDRED,
     latestWeightKg: Double? = null,
     profileWeightKg: Double = 75.0,
+    // The newest imported Apple Health / Health Connect active-energy figure — the Calories fallback when the
+    // app's own per-day estimate is absent. Shared with the Your-cards row so both surfaces agree (#calories).
+    latestActiveKcal: Double? = null,
     importedStepsForDay: Int? = null,
     estimatedStepsForDay: Int? = null,
     // #316 / @63, the selected day's representative activity class (0=still, 1=walk, 2=run), shown as a small
@@ -4185,8 +4290,18 @@ private fun MetricGrid(
     // read their series off `w` (the DailyMetric windows).
     restSpark: List<Double> = emptyList(),
     enabledMetrics: List<KeyMetric> = KeyMetric.defaultOrder,
+    // History (oldest→newest) for the personal-baseline banding that tints the vital tiles by STATE
+    // (green on baseline → amber → red), matching the Vital Signs screen. Empty → vitals keep their
+    // identity tint (the fallback), so a caller that doesn't supply history is unaffected.
+    days: List<DailyMetric> = emptyList(),
+    // The "colour Today vitals by state" setting (default off → identity tints); see VitalStatus.color.
+    colourVitalsByState: Boolean = false,
     isToday: Boolean = false,
     onScoreInfo: (ScoreSection) -> Unit = {},
+    // A tap on a vital / Steps / Calories tile opens that metric's detail (vital_detail/<key>) — the SAME
+    // destination its Your-cards row uses, via [keyMetricDetailKey]. Defaults to a no-op for callers that
+    // don't wire navigation (e.g. a preview).
+    onOpenMetric: (String) -> Unit = {},
     // S5: cap the grid to the first METRICS_COLLAPSED_CAP tiles behind a "Show all metrics" expander,
     // collapsing OVERFLOW only (never dropping or reordering a user-selected tile, #251). Defaults keep the
     // grid fully expanded for any caller that doesn't opt into the cap.
@@ -4226,55 +4341,58 @@ private fun MetricGrid(
             frac = restScore?.let { (it / 100.0).coerceIn(0.0, 1.0) },
         ),
         KeyMetric.HRV to run {
-            val v = d?.avgHrv ?: carriedDay?.avgHrv
+            // Shared read on the recovery-INDEPENDENT vitals carry (#543): the tile now agrees with the
+            // vitals card + Your-cards row even at the rollover when last night's recovery was nulled.
+            val mv = MetricReads.hrv(d, vitalsDay)
             KeyTileData(
                 label = "HRV",
-                value = v?.let { "${it.roundToInt()}" } ?: NO_DATA,
-                unit = if (v != null) "ms" else "",
-                tint = Palette.metricCyan,
-                frac = v?.let { (it / 120.0).coerceIn(0.0, 1.0) },
+                value = mv.number ?: NO_DATA,
+                unit = if (mv.hasValue) mv.unit else "",
+                tint = VitalStatus.color("hrv", d, days, Palette.metricCyan, colourVitalsByState),
+                frac = mv.frac,
             )
         },
         KeyMetric.RESTING_HR to run {
-            val v = d?.restingHr ?: carriedDay?.restingHr
+            val mv = MetricReads.restingHr(d, vitalsDay)
             KeyTileData(
                 label = "Rest HR",
-                value = v?.toString() ?: NO_DATA,
-                unit = if (v != null) "bpm" else "",
-                tint = Palette.metricRose,
-                frac = v?.let { (it / 100.0).coerceIn(0.0, 1.0) },
+                value = mv.number ?: NO_DATA,
+                unit = if (mv.hasValue) mv.unit else "",
+                tint = VitalStatus.color("rhr", d, days, Palette.metricRose, colourVitalsByState),
+                frac = mv.frac,
             )
         },
         KeyMetric.BLOOD_OXYGEN to run {
-            val v = d?.spo2Pct ?: carriedDay?.spo2Pct
+            // Shared read (carry = the recovery-gated carriedDay; SpO₂ stays recovery-gated by design).
+            val mv = MetricReads.bloodOxygen(d, carriedDay)
             KeyTileData(
                 label = "Blood Oxygen",
-                value = v?.let { String.format(Locale.US, "%.0f", it) } ?: NO_DATA,
-                unit = if (v != null) "%" else "",
-                tint = Palette.metricCyan,
-                frac = v?.let { (it / 100.0).coerceIn(0.0, 1.0) },
+                value = mv.number ?: NO_DATA,
+                unit = if (mv.hasValue) mv.unit else "",
+                tint = VitalStatus.color("spo2", d, days, Palette.metricCyan, colourVitalsByState),
+                frac = mv.frac,
             )
         },
         KeyMetric.RESPIRATORY to run {
-            val v = d?.respRateBpm ?: carriedDay?.respRateBpm
+            val mv = MetricReads.respiratory(d, vitalsDay)
             KeyTileData(
                 label = "Respiratory",
-                value = v?.let { String.format(Locale.US, "%.1f", it) } ?: NO_DATA,
-                unit = if (v != null) "rpm" else "",
-                tint = Palette.accent,
-                frac = v?.let { (it / 24.0).coerceIn(0.0, 1.0) },
+                value = mv.number ?: NO_DATA,
+                unit = if (mv.hasValue) mv.unit else "",
+                tint = VitalStatus.color("resp", d, days, Palette.accent, colourVitalsByState),
+                frac = mv.frac,
             )
         },
         KeyMetric.STEPS to run {
-            // Steps precedence (unchanged): on-device count → imported → estimate. (#107/#150)
-            val realSteps = d?.steps ?: importedStepsForDay
-            val steps = realSteps ?: estimatedStepsForDay
+            // Steps precedence (on-device → imported → estimate, #107/#150) + fill ceiling now shared with
+            // the Your-cards row via MetricReads; only the number FORMAT differs (bare here, grouped there).
+            val steps = MetricReads.stepsResolved(d?.steps, importedStepsForDay, estimatedStepsForDay)
             KeyTileData(
                 label = "Steps",
                 value = steps?.let { intString(it.toDouble()) } ?: NO_DATA,
                 unit = "",
                 tint = Palette.metricCyan,
-                frac = steps?.let { (it / 10000.0).coerceIn(0.0, 1.0) },
+                frac = MetricReads.stepsFrac(steps),
             )
         },
         KeyMetric.WEIGHT to run {
@@ -4287,17 +4405,24 @@ private fun MetricGrid(
                 frac = null,
             )
         },
-        KeyMetric.CALORIES to KeyTileData(
-            label = "Calories",
-            value = d?.activeKcalEst?.let { intString(it) } ?: NO_DATA,
-            unit = if (d?.activeKcalEst != null) "kcal" else "",
-            tint = Palette.metricAmber,
-            frac = d?.activeKcalEst?.let { (it / 800.0).coerceIn(0.0, 1.0) },
-        ),
+        KeyMetric.CALORIES to run {
+            // Day estimate first, imported Apple/HC latest as fallback — the SAME resolution the Your-cards
+            // row uses, so the two surfaces can no longer show a value on one and "No Data" on the other.
+            val kcal = MetricReads.caloriesResolved(d?.activeKcalEst, latestActiveKcal)
+            KeyTileData(
+                label = "Calories",
+                value = kcal?.let { intString(it) } ?: NO_DATA,
+                unit = if (kcal != null) "kcal" else "",
+                tint = Palette.metricAmber,
+                frac = MetricReads.caloriesFrac(kcal),
+            )
+        },
     )
 
-    // Resolve the enabled tiles to their descriptors, dropping any unknown key defensively.
-    val allTiles = enabledMetrics.mapNotNull { descriptors[it] }
+    // Resolve the enabled tiles to their descriptors, PAIRED with their KeyMetric so a tap can open the
+    // metric's own detail (like the Your-cards rows already do); unknown keys are dropped defensively.
+    val allTiles: List<Pair<KeyMetric, KeyTileData>> =
+        enabledMetrics.mapNotNull { m -> descriptors[m]?.let { m to it } }
     // S5: slice from the FRONT of the saved order so a pinned/selected tile is never dropped or reordered
     // (#251); only the tail folds behind the expander. Mirrors the iOS visibleKeyMetrics prefix(cap).
     val hasOverflow = allTiles.size > METRICS_COLLAPSED_CAP
@@ -4308,7 +4433,14 @@ private fun MetricGrid(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         tiles.chunked(3).forEach { rowTiles ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                rowTiles.forEach { tile -> LiquidKeyTile(tile, modifier = Modifier.weight(1f)) }
+                rowTiles.forEach { (metric, tile) ->
+                    LiquidKeyTile(
+                        tile,
+                        modifier = Modifier.weight(1f),
+                        // Vitals + Steps + Calories open their metric detail; scores/Weight have none.
+                        onClick = keyMetricDetailKey(metric)?.let { key -> { onOpenMetric(key) } },
+                    )
+                }
                 repeat(3 - rowTiles.size) { Spacer(Modifier.weight(1f)) }
             }
         }
@@ -4336,6 +4468,19 @@ private fun MetricGrid(
     }
 }
 
+/** The vital-detail key a Key-Metrics tile opens on tap, or null for tiles with no detail page: the
+ *  Charge / Effort / Rest scores reach their explainer via the ring ⓘ, and Weight has no trend page.
+ *  Mirrors [dashboardCardMetricKey] so a tile and its Your-cards row open the SAME detail. */
+private fun keyMetricDetailKey(m: KeyMetric): String? = when (m) {
+    KeyMetric.HRV -> "hrv"
+    KeyMetric.RESTING_HR -> "rhr"
+    KeyMetric.BLOOD_OXYGEN -> "spo2"
+    KeyMetric.RESPIRATORY -> "resp"
+    KeyMetric.STEPS -> "steps_est"
+    KeyMetric.CALORIES -> "active_kcal"
+    KeyMetric.CHARGE, KeyMetric.EFFORT, KeyMetric.REST, KeyMetric.WEIGHT -> null
+}
+
 /** One compact Key-Metrics tile's data: iOS `ktile`(label, value, unit, tint, frac). */
 private data class KeyTileData(
     val label: String,
@@ -4352,12 +4497,14 @@ private data class KeyTileData(
  * old tall 2-column SparkStatTile. A No-Data value dims and the tube reads empty.
  */
 @Composable
-private fun LiquidKeyTile(data: KeyTileData, modifier: Modifier = Modifier) {
+private fun LiquidKeyTile(data: KeyTileData, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val hasValue = data.value != NO_DATA
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .frostedCardSurface(cornerRadius = 16.dp)
+            // Tappable only when the metric has a detail page; the ripple is clipped to the tile's corner.
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 11.dp)
             .semantics { contentDescription = "${data.label} ${data.value} ${data.unit}".trim() },
         verticalArrangement = Arrangement.spacedBy(6.dp),

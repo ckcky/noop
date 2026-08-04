@@ -742,8 +742,7 @@ private fun VitalityHero(
 // The frosted translucent-black hero-card wrapper (mock rgba(13,14,20,.80), radius 26, white@0.11
 // hairline) that floats the hero over the day-of-sky so the vessel + white count-up stay crisp — the
 // card does the contrast work, not a muted sky. Byte-matched to the Today pilot's LIQUID_HERO_* values.
-private val HEALTH_HERO_FILL: Color =
-    Color(red = 13f / 255f, green = 14f / 255f, blue = 20f / 255f, alpha = 0.80f)
+private val HEALTH_HERO_FILL: Color get() = Palette.heroFill
 private val HEALTH_HERO_RADIUS: Dp = 26.dp
 
 /** Wrap a hero's content in the frosted liquid glass surface so it floats over the sky backdrop. Applied
@@ -756,7 +755,7 @@ private fun LiquidHeroCard(content: @Composable () -> Unit) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(HEALTH_HERO_RADIUS))
             .background(HEALTH_HERO_FILL)
-            .border(1.dp, Color.White.copy(alpha = 0.11f), RoundedCornerShape(HEALTH_HERO_RADIUS))
+            .border(1.dp, Palette.heroHairline, RoundedCornerShape(HEALTH_HERO_RADIUS))
             .padding(Metrics.cardPadding),
     ) {
         content()
@@ -1512,13 +1511,11 @@ private data class Vital(
     /** Value with its unit appended, or null when no data. */
     val formattedValue: String? = value?.let { "${format(it)} $unit" }
 
-    /** Colour communicates state: in-range = the metric's category colour,
-     *  out-of-range = warning amber, no data = tertiary. */
-    val accent: Color = when (banding.band) {
-        VitalBands.Band.NO_DATA -> Palette.textTertiary
-        VitalBands.Band.IN_RANGE -> metricColor
-        VitalBands.Band.OUT_OF_RANGE -> Palette.statusWarning
-    }
+    /** Colour communicates STATE on one continuous scale: the value's goodness (1 = on your baseline →
+     *  green, drifting → amber, off → red) sampled through the shared [Palette.goodnessColor] gradient — the
+     *  SAME ramp the recovery score uses. No data = tertiary grey. (Identity is carried by the tile's label,
+     *  not the hue, so the colour now means "how am I doing", not "which metric".) */
+    val accent: Color = banding.goodness?.let { Palette.goodnessColor(it) } ?: Palette.textTertiary
 
     /** The in-range caption that stands in for a StatePill inside the fixed-height tile.
      *  The wording says which yardstick judged it: your baseline vs typical ranges. */
@@ -1707,12 +1704,13 @@ private fun VitalTile(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            // A metric-tinted sparkline trail with a glowing "now" end-cap, mirroring Today's tiles.
+            // A goodness-tinted sparkline trail with a glowing "now" end-cap, mirroring Today's tiles. Uses
+            // the same [accent] gradient colour as the value so trail and number agree on state.
             // Hidden below two points so a sparse vital shows the caption with no flat trail.
             if (vital.sparkline.size > 1) {
                 TileSparkline(
                     values = vital.sparkline,
-                    color = vital.metricColor,
+                    color = accent,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(20.dp)
@@ -1826,8 +1824,10 @@ fun VitalDetailScreen(vm: AppViewModel, key: String) {
     var seriesDetail by remember(key) { mutableStateOf<VitalDetailModel?>(null) }
     var seriesLoaded by remember(key) { mutableStateOf(false) }
     if (isSeriesBacked) {
-        LaunchedEffect(key) {
-            seriesDetail = buildSeriesVitalDetail(vm, key)
+        // Keyed on `days` too: active_kcal now folds in the per-day activeKcalEst estimate, so the trend
+        // must rebuild when the cached days change (the other series keys ignore `days` harmlessly).
+        LaunchedEffect(key, days) {
+            seriesDetail = buildSeriesVitalDetail(vm, key, days)
             seriesLoaded = true
         }
     }
@@ -2132,7 +2132,7 @@ private fun buildVitalDetail(
  *  the repo (async): Fitness Age + Vitality off the computed strap the IntelligenceEngine writes, Steps
  *  off the resolved step series (imported ∪ estimated), Active Energy off the Apple-Health import. Colours
  *  match each card's dashboard tint. Returns null for an unknown key. */
-private suspend fun buildSeriesVitalDetail(vm: AppViewModel, key: String): VitalDetailModel? = when (key) {
+private suspend fun buildSeriesVitalDetail(vm: AppViewModel, key: String, days: List<DailyMetric>): VitalDetailModel? = when (key) {
     "fitness_age" -> VitalDetailModel(
         key = key,
         title = "Fitness Age",
@@ -2160,15 +2160,18 @@ private suspend fun buildSeriesVitalDetail(vm: AppViewModel, key: String): Vital
         format = { it.roundToInt().toString() },
     )
     "active_kcal" -> {
-        // Read active energy from the SAME apple-health ∪ health-connect union the Today Calories card uses.
-        // Health Connect (the common Android source) writes activeKcal only into the AppleDaily table under
-        // "health-connect", not as an active_kcal metricSeries row, so reading metricSeries("apple-health") alone
-        // opened an empty detail for a Health-Connect-only user whose card DID show a number. One point per day,
-        // apple-health winning a tie (matching the card's newest-value read), ascending.
-        val rows = vm.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31") +
-            vm.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31")
+        // Match the Today Calories card's resolution EXACTLY: the app's own per-day estimate (activeKcalEst)
+        // first, the imported Apple Health / Health Connect active energy as the fallback. Reading ONLY the
+        // import (as this did before) left the detail EMPTY for a strap-only user whose card now shows the
+        // estimate — a card↔detail mismatch (the card resolves activeKcalEst ?: import via MetricReads).
+        // activeKcalEst wins its day; the import fills any day the estimate doesn't cover (incl. days older
+        // than the cached `days` window). Health Connect writes activeKcal into the AppleDaily table (not an
+        // active_kcal metricSeries row), which is why the import is read from appleDaily, not metricSeries.
         val byDay = LinkedHashMap<String, Double>()
-        for (r in rows) r.activeKcal?.let { byDay.putIfAbsent(r.day, it) }
+        for (d in days) d.activeKcalEst?.let { byDay[d.day] = it }
+        val imported = vm.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31") +
+            vm.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31")
+        for (r in imported) r.activeKcal?.let { byDay.putIfAbsent(r.day, it) }
         VitalDetailModel(
             key = key,
             title = "Active Energy",

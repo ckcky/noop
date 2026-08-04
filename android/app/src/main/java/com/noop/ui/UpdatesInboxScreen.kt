@@ -17,6 +17,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.AutoAwesome
@@ -80,9 +82,15 @@ fun UpdatesInboxScreen(
     val unread = sorted.filter { !it.read }
     val read = sorted.filter { it.read }
 
+    // The inbox grows without bound (release notes + daily "new data" readings + dismissed cards), so
+    // the body SCROLLS inside the sheet. Without this the content was simply clipped at the sheet's
+    // height: older rows, and the Clear-all / Mark-all-read footer, became unreachable once a handful
+    // of items had accumulated. A plain verticalScroll (not a LazyColumn) because the store is capped
+    // at ~50 informational rows and the sections are already built eagerly for the read/unread split.
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
             .padding(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(Metrics.sectionGap),

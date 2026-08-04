@@ -447,17 +447,33 @@ class WhoopRepository(private val dao: WhoopDao) {
      *  Motion is written ONLY under the computed ("-noop") source by the engine, so we read there; an
      *  imported-only night (no computed twin) has no motion (absent stays absent , an honest empty state,
      *  never a fabricated zero array). Does NOT resolve the night: the caller has already chosen the
-     *  main-night GROUP and passes those blocks' starts. A start with no stored series is omitted. Mirrors
-     *  iOS Repository.sessionMotions. */
+     *  main-night GROUP and passes those blocks' starts. A start with no stored series is omitted.
+     *
+     *  #1008: read the COMPUTED UNION (active strap's "-noop" sibling FIRST, then the canonical
+     *  "my-whoop-noop"), not one id. The engine banks motion under `<activeStrapId>-noop` (analyzeRecent's
+     *  `importedDeviceId` is the registry's ACTIVE id), so after a strap re-add / "Make active" every newly
+     *  scored night's series lands under the fresh id while the history stays under the canonical one ,
+     *  reading a single id dropped whichever side the night wasn't scored under and the Sleep tab showed
+     *  "No movement detail" from the switch onward. A single-device install collapses to one id, so the
+     *  read is byte-identical to the pre-union behaviour. Mirrors iOS Repository.sessionMotions. */
     suspend fun sessionMotions(strapDeviceId: String, starts: List<Long>): Map<Long, List<Double>> {
         if (starts.isEmpty()) return emptyMap()
-        val computedId = computedDeviceId(strapDeviceId)
-        val out = HashMap<Long, List<Double>>()
-        for (start in starts) {
-            val m = dao.sessionMotionJson(computedId, start)?.let { decodeDoubleArray(it) }
-            if (!m.isNullOrEmpty()) out[start] = m
+        // One indexed lookup per (id, start), and only for the starts a HIGHER-priority id hasn't already
+        // resolved , so the canonical fallback costs nothing on the nights the active strap scored, and a
+        // single-device install issues exactly the same query count as the pre-union read.
+        val perId = ArrayList<Map<Long, List<Double>>>()
+        var remaining = starts.distinct()
+        for (id in computedSourceIds(strapDeviceId)) {
+            if (remaining.isEmpty()) break
+            val byStart = HashMap<Long, List<Double>>()
+            for (start in remaining) {
+                val m = dao.sessionMotionJson(id, start)?.let { decodeDoubleArray(it) }
+                if (!m.isNullOrEmpty()) byStart[start] = m
+            }
+            perId.add(byStart)
+            remaining = remaining.filterNot { byStart.containsKey(it) }
         }
-        return out
+        return unionMotionByStart(perId)
     }
 
     /** Persist the decoded v18 band sleep_state per epoch for one session (H2), keyed by [sessionStart].
@@ -534,8 +550,8 @@ class WhoopRepository(private val dao: WhoopDao) {
     /**
      * DISPLAY-ONLY: reconcile a workout's shown HR with the strap trace that actually drives its
      * graph / zones / effort (#77, #499). The detail screen always charts and zone-bins the strap's
-     * own ~1 Hz samples over [startTs, endTs] (under [strapDeviceId]); the displayed Avg HR comes from
-     * the stored `avgHr` column. Those two can DIVERGE , a hand-edited Avg (128→139) changes the number
+     * own ~1 Hz samples over [startTs, endTs] (under the #1008 union of [strapDeviceId]); the displayed
+     * Avg HR comes from the stored `avgHr` column. Those two can DIVERGE , a hand-edited Avg (128→139) changes the number
      * but not the trace, so the average no longer matches the graph/zones/effort (#499). Here we make the
      * stored field defer to the trace whenever the trace is present:
      *
@@ -565,6 +581,13 @@ class WhoopRepository(private val dao: WhoopDao) {
         strainSex: String = "male",
     ): List<WorkoutRow> {
         var budget = cap
+        // #1008: the strap trace lives under whichever lineage was active when the session was recorded ,
+        // a pre-re-add workout's HR is on the canonical id, a post-re-add one's on the fresh id. Reading a
+        // single id left every workout on the other side of the switch with no trace at all (blank detail
+        // graph, no zone split, and a strap-native row's Effort never filled). Walk the union active-first
+        // and take the FIRST id whose window actually carries enough samples. A single-WHOOP install has
+        // one id ⇒ the same single query per row as before.
+        val strapIds = importedSourceIds(strapDeviceId)
         return rows.map { row ->
             if (row.endTs <= row.startTs || budget <= 0) return@map row
             // Strap-native rows are graphed/zoned/scored from the strap trace, so their Avg HR must come
@@ -576,13 +599,16 @@ class WhoopRepository(private val dao: WhoopDao) {
             val needsStrainFill = strapNative && row.strain == null && strainMaxHR != null
             if (!strapNative && row.avgHr != null && !needsStrainFill) return@map row
             budget -= 1
-            val stats = dao.hrWindowStats(strapDeviceId, row.startTs, row.endTs)
+            // [traceId] is the id that actually answered, carried forward so the #961 strain re-read below
+            // samples the SAME lineage the avg/max came from (never a mix of two straps' traces for one
+            // session).
+            val (traceId, stats) = strapWindowStats(strapIds, row.startTs, row.endTs, minSamples)
             if (stats.n < minSamples || stats.avg == null || stats.max == null) return@map row
             // #961: recompute Effort from the SAME samples the graph/zones use. Read the raw window ONLY when
             // this row actually needs a strain (keeps the common no-fill path a single aggregate query), and
             // let StrainScorer return null on a still-too-thin window (never a fabricated number).
             val filledStrain = if (needsStrainFill && strainMaxHR != null) {
-                val samples = dao.hrSamples(strapDeviceId, row.startTs, row.endTs, 8000)
+                val samples = dao.hrSamples(traceId, row.startTs, row.endTs, 8000)
                 com.noop.analytics.StrainScorer.strain(samples, maxHR = strainMaxHR, sex = strainSex)
             } else null
             if (strapNative) {
@@ -595,6 +621,32 @@ class WhoopRepository(private val dao: WhoopDao) {
                 row.copy(avgHr = stats.avg.roundToInt(), maxHr = row.maxHr ?: stats.max)
             }
         }
+    }
+
+    /**
+     * The first id in [ids] (active-first, #1008) whose [from, to] window carries a usable HR trace
+     * (>= [minSamples] with a real avg/max), paired with that window's stats. Falls through to the LAST
+     * id's stats when none qualifies, so the caller's existing "not enough samples" guard still sees a
+     * real (empty-ish) stats row and returns the workout untouched.
+     *
+     * Only the ids a higher-priority one hasn't already satisfied are queried, so a single-WHOOP install
+     * issues exactly ONE query per row , the same count as the pre-union read. Mirrors the fallback walk
+     * in [sessionMotions].
+     */
+    private suspend fun strapWindowStats(
+        ids: List<String>,
+        from: Long,
+        to: Long,
+        minSamples: Long,
+    ): Pair<String, HrWindowStats> {
+        var chosen = ids[0]
+        var stats = dao.hrWindowStats(chosen, from, to)
+        for (id in ids.drop(1)) {
+            if (stats.n >= minSamples && stats.avg != null && stats.max != null) break
+            chosen = id
+            stats = dao.hrWindowStats(id, from, to)
+        }
+        return chosen to stats
     }
 
     suspend fun rrIntervals(deviceId: String, from: Long, to: Long, limit: Int = DEFAULT_LIMIT) =
@@ -650,6 +702,15 @@ class WhoopRepository(private val dao: WhoopDao) {
     /** Dismissed detected-bout markers for the computed source of [strapDeviceId]. */
     suspend fun dismissedDetected(strapDeviceId: String = "my-whoop"): List<DismissedWorkout> =
         dao.dismissedWorkouts(computedDeviceId(strapDeviceId))
+
+    /** Dismissed detected-bout markers across the COMPUTED union of [activeDeviceId] (#1008), so a bout
+     *  the user dismissed BEFORE a strap re-add stays dismissed after it: the marker was written under
+     *  the computed id that was active at the time, and a single-id read stopped finding it the moment
+     *  the active id changed (the bout silently came back). [WorkoutEditing.filterDismissed] matches by
+     *  SPAN OVERLAP, so a marker appearing under both ids is harmless , no de-dupe needed. A
+     *  single-device install resolves to one id ⇒ byte-identical to [dismissedDetected]. */
+    suspend fun dismissedDetectedUnion(activeDeviceId: String): List<DismissedWorkout> =
+        computedSourceIds(activeDeviceId).flatMap { dao.dismissedWorkouts(it) }
 
     /** Deleted-sleep tombstones for BOTH the imported and computed sources of [strapDeviceId] (#33/#65).
      *
@@ -816,6 +877,29 @@ class WhoopRepository(private val dao: WhoopDao) {
     suspend fun workouts(deviceId: String, from: Long, to: Long, limit: Int = DEFAULT_LIMIT): List<WorkoutRow> =
         dao.workouts(deviceId, from, to, limit)
 
+    /**
+     * IMPORTED (strap + manual) workouts over the read-side UNION of the active strap id AND the canonical
+     * "my-whoop" (SPINE / #814), active-first.
+     *
+     * #1008: a strap made active under its own real id banks every NEW manual / live-tracked session under
+     * that id while the whole earlier imported history stays on the canonical one. The Workouts list read a
+     * single id, so after the switch the entire pre-switch WHOOP history dropped off the screen , the same
+     * split that emptied the Sleep movement strip, in the other direction. A single-WHOOP install resolves
+     * to ONE id ⇒ [dao.workouts] verbatim ⇒ byte-identical.
+     */
+    suspend fun workoutsUnion(activeDeviceId: String, from: Long, to: Long, limit: Int = DEFAULT_LIMIT):
+        List<WorkoutRow> = unionWorkouts(importedSourceIds(activeDeviceId).map { dao.workouts(it, from, to, limit) })
+
+    /**
+     * DETECTED bouts over the COMPUTED union of [activeDeviceId] ("<id>-noop"), active-first. The engine
+     * banks each run's detected rows under the computed twin of the id that was active when it ran, so
+     * bouts detected before a strap re-add live under the canonical computed id and everything after it
+     * under the fresh one , a single-id read showed only one side. Single-device install ⇒ one id ⇒
+     * byte-identical.
+     */
+    suspend fun detectedWorkoutsUnion(activeDeviceId: String, from: Long, to: Long, limit: Int = DEFAULT_LIMIT):
+        List<WorkoutRow> = unionWorkouts(computedSourceIds(activeDeviceId).map { dao.workouts(it, from, to, limit) })
+
     /** Journal entries for the inclusive day range [from, to] (YYYY-MM-DD), oldest first. */
     suspend fun journal(deviceId: String, from: String, to: String): List<JournalEntry> =
         dao.journal(deviceId, from, to)
@@ -831,6 +915,22 @@ class WhoopRepository(private val dao: WhoopDao) {
 
     /** All cached daily metrics for a device, oldest first. Feeds com.noop.analytics.IllnessWatch. */
     suspend fun days(deviceId: String): List<DailyMetric> = dao.days(deviceId)
+
+    /**
+     * All cached daily metrics over the read-side UNION of the active strap id AND the canonical
+     * "my-whoop" (SPINE / #814), active-first so the active lineage wins a day both cover. The suspend
+     * twin of [daysMergedFlow]'s imported leg, for the [com.noop.analytics.IntelligenceEngine] pass-1
+     * baseline fold: a strap made active under its REAL id leaves the whole earlier imported history
+     * anchored on the canonical id, and a single-id read folded a baseline from only the post-switch
+     * nights. Single-WHOOP install resolves to ONE id ⇒ `days()` verbatim ⇒ byte-identical.
+     * Oldest-first ordering is preserved (both legs are oldest-first and [unionByDay] keeps insertion
+     * order, so the union is re-sorted here to stay monotonic across the seam).
+     */
+    suspend fun daysUnion(activeDeviceId: String): List<DailyMetric> {
+        val ids = importedSourceIds(activeDeviceId)
+        if (ids.size == 1) return dao.days(ids[0])
+        return unionByDay(ids.map { dao.days(it) }).sortedBy { it.day }
+    }
 
     /**
      * One-time #34 refile: move legacy Health Connect data out of the shared "apple-health" bucket into
@@ -1261,6 +1361,42 @@ class WhoopRepository(private val dao: WhoopDao) {
          *  scores under "<importedDeviceId>-noop"). */
         fun computedSourceIdsFor(activeDeviceId: String): List<String> =
             importedSourceIdsFor(activeDeviceId).map { "$it-noop" }
+
+        /** Active-first merge of the per-epoch MOTION maps read under each #1008 computed union id
+         *  ([perId] in [computedSourceIdsFor] order, so the active strap's sibling comes first). The first
+         *  NON-EMPTY series per start wins; an empty/absent entry never masks a real series banked under a
+         *  later id, and a start with no series anywhere stays ABSENT from the result (the honest empty
+         *  state the Sleep tab renders as "No movement detail"). Pure companion form so the JVM tests
+         *  exercise it without Room ([MotionReadUnionTest]). Mirrors unionByDay's active-wins rule. (#407) */
+        internal fun unionMotionByStart(perId: List<Map<Long, List<Double>>>): Map<Long, List<Double>> {
+            val out = HashMap<Long, List<Double>>()
+            for (byStart in perId) {
+                for ((start, series) in byStart) {
+                    if (series.isNotEmpty() && out[start] == null) out[start] = series
+                }
+            }
+            return out
+        }
+
+        /** Active-first merge of the workout rows read under each #1008 union id ([perId] in
+         *  [importedSourceIdsFor] / [computedSourceIdsFor] order, so the ACTIVE strap's rows come first).
+         *  Collapses on (startTs, sport) , the workout table's PK minus the deviceId, so the SAME session
+         *  re-banked under both lineages surfaces once with the active copy winning, while genuinely
+         *  distinct sessions (different start, or a run and a lift at the same start) both survive.
+         *  Oldest-first order is restored at the end because the per-id legs are each oldest-first and
+         *  concatenating them would interleave the lineages at the switch seam. Pure companion form so
+         *  the JVM tests exercise it without Room ([WorkoutReadUnionTest]). */
+        internal fun unionWorkouts(perId: List<List<WorkoutRow>>): List<WorkoutRow> {
+            if (perId.size == 1) return perId[0]
+            val out = LinkedHashMap<Pair<Long, String>, WorkoutRow>()
+            for (rows in perId) {
+                for (row in rows) {
+                    val key = row.startTs to row.sport
+                    if (out[key] == null) out[key] = row
+                }
+            }
+            return out.values.sortedBy { it.startTs }
+        }
 
         /** Drop sleep blocks sharing an identical (startTs, endTs) , the same physical night recorded
          *  under two #814 union ids , keeping the FIRST seen (the callers pass active-strap-first lists,

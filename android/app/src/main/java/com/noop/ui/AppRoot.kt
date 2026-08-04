@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
@@ -67,14 +69,18 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.noop.BuildConfig
 import com.noop.R
 import com.noop.analytics.FusionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
@@ -90,6 +96,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -165,6 +172,9 @@ private enum class Destination(
     Notifications("notifications", R.string.nav_notifications, Icons.Filled.Notifications),
     Support("support", R.string.nav_support, Icons.Filled.Tune),
     Settings("settings", R.string.nav_settings, Icons.Filled.Settings),
+    // Profile is its own page (the "account" surface), reached from the Today header avatar — not listed
+    // in any [DrawerGroup], like CoupledView. A Settings gear on the Profile screen hops to Settings.
+    Profile("profile", R.string.nav_profile, Icons.Filled.AccountCircle),
     TestCentre("test_centre", R.string.nav_test_centre, Icons.Filled.BugReport),
 
     // The "More" tab: its own navigated page (mirroring the iOS More tab) that hosts the full
@@ -261,18 +271,34 @@ internal object MoreSectionPrefs {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppRoot(viewModel: AppViewModel = viewModel()) {
+fun AppRoot(
+    viewModel: AppViewModel = viewModel(),
+    deepLink: MutableState<String?>? = null,
+) {
     val nav = rememberNavController()
 
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val current = Destination.forRoute(currentRoute)
+
+    // Home-screen launcher shortcut: MainActivity stages the requested route here (see ShortcutRoutes);
+    // jump to it once, then clear the flag so a recomposition / config change can't re-fire the jump.
+    // Uses the same top-level nav as the bottom bar, so the target reads as a normal tab switch.
+    LaunchedEffect(deepLink?.value) {
+        val dl = deepLink ?: return@LaunchedEffect
+        val route = dl.value ?: return@LaunchedEffect
+        if (route != currentRoute) nav.navigateTopLevel(route)
+        dl.value = null
+    }
     var showQuickActions by remember { mutableStateOf(false) }
     // The Updates inbox sheet (opened by the Today header bell). The store is a process singleton so
     // the Today cards and the import path post to the same inbox this sheet renders.
     val context = androidx.compose.ui.platform.LocalContext.current
     val updateStore = remember { UpdateStore.from(context) }
     var showUpdatesInbox by remember { mutableStateOf(false) }
+    // The full changelog sheet, reachable from a release-note row in the inbox (and, independently,
+    // from Settings → About → What's new — both render the same [WhatsNewSheet]).
+    var showWhatsNew by remember { mutableStateOf(false) }
 
     run {
         Scaffold(
@@ -291,10 +317,19 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                 )
             },
         ) { inner ->
+            // Shell body. On the PREVIEW channel a fixed build band ([PreviewChannelBand]) is pinned to
+            // the very top OVER the NavHost — so it stays put while any screen scrolls AND persists across
+            // every tab/drill navigation (Settings · Today · Trends · Sleep · …) — and the NavHost gets
+            // matching extra top padding so no screen's content hides behind it. Stable renders neither,
+            // so stable's layout is byte-for-byte unchanged.
+            val isPreviewChannel = BuildConfig.CHANNEL == "preview"
+            Box(modifier = Modifier.fillMaxSize()) {
             NavHost(
                 navController = nav,
                 startDestination = Destination.Today.route,
-                modifier = Modifier.padding(inner),
+                modifier = Modifier
+                    .padding(inner)
+                    .then(if (isPreviewChannel) Modifier.padding(top = PreviewBandContentHeight) else Modifier),
                 // README motion: top-level destinations crossfade (~240ms) on the calm,
                 // decelerating global easing — nothing slides or bounces between tabs. The
                 // same fade is used for back (pop) so the bar never feels jerky. Drill-ins
@@ -317,8 +352,10 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                         // and opens the inbox sheet AppRoot presents (it owns the nav for deep-links).
                         updateStore = updateStore,
                         onOpenUpdates = { showUpdatesInbox = true },
-                        // The leading profile avatar opens Settings (where the photo is set/changed),
-                        // mirroring iOS's avatar-leading Today header. The drawer hamburger is unchanged.
+                        // The leading avatar now opens the Profile page (the "account" surface); Settings is
+                        // reached from a gear there, and still lives in More → App. onOpenSettings stays for
+                        // the other Today entry points (e.g. the battery ring's Devices default).
+                        onOpenProfile = { nav.navigateTopLevel(Destination.Profile.route) },
                         onOpenSettings = { nav.navigateTopLevel(Destination.Settings.route) },
                         // The opt-in Hydration card (only shown when Hydration tracking is on) pushes its
                         // detail. A normal push so the back-stack returns to Today.
@@ -427,12 +464,19 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                 composable(Destination.Settings.route) {
                     SettingsScreen(viewModel, onOpenTestCentre = { nav.navigate(Destination.TestCentre.route) })
                 }
+                composable(Destination.Profile.route) {
+                    ProfileScreen(viewModel, onOpenSettings = { nav.navigateTopLevel(Destination.Settings.route) })
+                }
                 composable(Destination.TestCentre.route) { TestCentreScreen(viewModel) }
                 // The "More" page — the iOS More tab's twin: a navigated ScreenScaffold page hosting the
                 // full grouped destination list (was a pull-up sheet). A row navigates top-level.
                 composable(Destination.More.route) {
                     MoreScreen(onNavigate = { nav.navigateTopLevel(it) })
                 }
+            }
+            if (isPreviewChannel) {
+                PreviewChannelBand(modifier = Modifier.align(Alignment.TopCenter))
+            }
             }
         }
 
@@ -522,13 +566,18 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                     store = updateStore,
                     onClose = { showUpdatesInbox = false },
                     onDeepLink = { key ->
-                        // Map the inbox deep-link key to a route (only known keys route). "trends" is
-                        // the one real poster's target today; unknown keys just close the sheet.
-                        val route = when (key) {
-                            "trends" -> Destination.Trends.route
-                            else -> null
+                        // Map the inbox deep-link key to a destination (only known keys resolve;
+                        // unknown ones just close the sheet). "whatsNew" opens the changelog sheet
+                        // in place rather than navigating — it's the target of every release-note row.
+                        if (key == UpdateStore.DEEP_LINK_WHATS_NEW) {
+                            showWhatsNew = true
+                        } else {
+                            val route = when (key) {
+                                "trends" -> Destination.Trends.route
+                                else -> null
+                            }
+                            if (route != null && route != currentRoute) nav.navigateTopLevel(route)
                         }
-                        if (route != null && route != currentRoute) nav.navigateTopLevel(route)
                     },
                     onRestore = { cardId ->
                         // Flip the shared dismissed flag back off so the card reappears, and signal a
@@ -538,6 +587,79 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                     },
                 )
             }
+        }
+
+        // The full changelog, opened by tapping a release-note row in the inbox. Same full-screen
+        // Dialog idiom Settings uses for its What's new / scoring-guide sheets.
+        if (showWhatsNew) {
+            Dialog(
+                onDismissRequest = { showWhatsNew = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Palette.surfaceBase) {
+                    WhatsNewSheet(onClose = { showWhatsNew = false })
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Preview channel build band
+//
+// A slim, always-on build band shown ONLY on the preview channel (BuildConfig.CHANNEL == "preview").
+// It carries the same channel-aware string as the Today build stamp ([buildStamp]) — version · build ·
+// branch@sha — but lives in [AppRoot] ABOVE the NavHost, so it stays fixed while a screen scrolls and
+// persists across every tab/drill navigation (Settings, Trends, Sleep, …). Stable never renders it, so
+// stable's layout is byte-for-byte unchanged. Edge/Chrome-Canary-style channel chrome: a diagnostic
+// ribbon, deliberately NOT a title bar — no wordmark, just the build identity for a bug report.
+
+/** Height of the band's CONTENT strip (excludes the status-bar inset the band also fills). The NavHost
+ *  reserves this as extra top padding on the preview channel so no screen hides behind the fixed band. */
+private val PreviewBandContentHeight: Dp = 30.dp
+
+@Composable
+private fun PreviewChannelBand(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        // Match the glass bar's language: a translucent raised surface with a hairline edge, so the band
+        // reads as the same floating-chrome family — here pinned to the top instead of the bottom.
+        color = Palette.surfaceRaised.copy(alpha = 0.94f),
+        contentColor = Palette.textSecondary,
+        shadowElevation = 3.dp,
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // Fill + clear the status bar so the band reads as a coloured top strip with its text
+                    // below the system clock (edge-to-edge: the activity draws under the status bar).
+                    .statusBarsPadding()
+                    .height(PreviewBandContentHeight)
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Preview · " + buildStamp(
+                        channel = BuildConfig.CHANNEL,
+                        versionName = BuildConfig.VERSION_NAME,
+                        versionCode = BuildConfig.VERSION_CODE,
+                        branch = BuildConfig.GIT_BRANCH,
+                        sha = BuildConfig.GIT_SHA,
+                    ),
+                    style = NoopType.number(9.5f),
+                    color = Palette.textSecondary,
+                    // Two lines: a branch preview's "… · <branch>@<sha>" easily outgrows one line; the
+                    // " · " separators are natural wrap points so the source lands on a centred second
+                    // line rather than being clipped. Ellipsis only for pathological lengths.
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = "Preview build" },
+                )
+            }
+            HorizontalDivider(color = Palette.hairline)
         }
     }
 }
@@ -563,6 +685,9 @@ private fun MoreScreen(onNavigate: (String) -> Unit) {
     // @AppStorage("more.expandedSections"). Seeded ONCE from the stored value so first run still shows the
     // Insights+Body default; every toggle writes through so the next visit reflects the saved state.
     val context = androidx.compose.ui.platform.LocalContext.current
+    // Support/donation off (Settings → Appearance) drops the More → Support entry too, so nothing points at
+    // the orphaned Support page. Read fresh each composition so a toggle in Settings shows on return here.
+    val showSupport = NoopPrefs.showSupport(context)
     val expanded = remember {
         val stored = MoreSectionPrefs.read(NoopPrefs.of(context), defaultExpandedHeaders())
         androidx.compose.runtime.mutableStateMapOf<String, Boolean>().apply {
@@ -591,11 +716,12 @@ private fun MoreScreen(onNavigate: (String) -> Unit) {
                     },
                 )
                 if (isOpen) {
+                    val items = group.items.filter { showSupport || it != Destination.Support }
                     NoopCard(padding = 0.dp) {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            group.items.forEachIndexed { i, dest ->
+                            items.forEachIndexed { i, dest ->
                                 MoreRow(dest = dest, onClick = { onNavigate(dest.route) })
-                                if (i < group.items.lastIndex) {
+                                if (i < items.lastIndex) {
                                     HorizontalDivider(
                                         color = Palette.hairline,
                                         modifier = Modifier.padding(start = 50.dp),

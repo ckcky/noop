@@ -77,6 +77,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.AnalyticsEngine
 import com.noop.analytics.SleepDebt
@@ -215,10 +216,16 @@ fun SleepScreen(
     // `sleeps`; `selectNight` reads only the ALREADY-resolved main-night GROUP's entries (no re-resolution)
     // and lays them along the hypnogram's timeline. A block with no stored series stays absent (honest empty
     // state for older rows whose motionJSON is NULL). Mirrors iOS SleepView.motionByStart.
+    //
+    // Reads the ACTIVE-strap ∪ canonical COMPUTED union (#1008), like `sleeps` above , NOT the hardcoded
+    // canonical id. The engine banks motion under "<activeStrapId>-noop", so after a strap re-add /
+    // "Make active" every night scored from that day on lands under the fresh id: the canonical-only read
+    // found nothing and the strip vanished mid-history while the hypnogram (already union-joined) kept
+    // drawing. `sessionMotions` resolves the union; a single-device install collapses to one id.
     var motionByStart by remember { mutableStateOf<Map<Long, List<Double>>>(emptyMap()) }
     LaunchedEffect(sleeps) {
         motionByStart = runCatching {
-            vm.repo.sessionMotions("my-whoop", sleeps.map { it.startTs })
+            vm.repo.sessionMotions(vm.activeStrapId, sleeps.map { it.startTs })
         }.getOrDefault(emptyMap())
     }
 
@@ -648,7 +655,7 @@ private fun SleepUndoBanner(session: SleepSession, onUndo: () -> Unit) {
 // fill is a translucent near-black (mock rgba(13,14,20,.80)) so the card floats OVER the day-of-sky and the
 // vessel + white count-up number stay crisp — the CARD does the contrast work, not a muted sky. Radius 26 +
 // a white@0.11 hairline give the frosted-glass edge. Same constants as the liquid Today heroCard.
-private val LIQUID_HERO_FILL: Color = Color(red = 13f / 255f, green = 14f / 255f, blue = 20f / 255f, alpha = 0.80f)
+private val LIQUID_HERO_FILL: Color get() = Palette.heroFill
 private val LIQUID_HERO_RADIUS: Dp = 26.dp
 
 // MARK: - 0. REST HERO — liquid sky + sleep-performance vessel (liquid restyle)
@@ -673,7 +680,7 @@ private fun RestHero(score: Double?, asleepMin: Double?, source: String) {
                 // white@0.11). Replaces the per-hero night atmosphere (the sky now lives at screen level).
                 .clip(RoundedCornerShape(LIQUID_HERO_RADIUS))
                 .background(LIQUID_HERO_FILL)
-                .border(1.dp, Color.White.copy(alpha = 0.11f), RoundedCornerShape(LIQUID_HERO_RADIUS)),
+                .border(1.dp, Palette.heroHairline, RoundedCornerShape(LIQUID_HERO_RADIUS)),
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(Metrics.space24),
@@ -789,6 +796,11 @@ private fun Hero(
     // empty state. Drawn UNDER the hypnogram on the same timeline. Mirrors iOS SleepView.Night.motionEpochs.
     motionEpochs: List<Double> = emptyList(),
 ) {
+    // Which hypnogram presentation the stage card draws — the stepped CURVE (default) or the original
+    // proportional STRIP. Read once into remembered state (SharedPreferences isn't reactive) and written
+    // through on every toggle, so the choice survives navigating nights, leaving the tab, and relaunching.
+    val context = LocalContext.current
+    var hypnogramStyle by remember { mutableStateOf(SleepDisplayPrefs.hypnogramStyle(context)) }
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
         NightNavHeader(nightOffset, lastIndex, clock, onNavigate, session, onUpdateTimes, onDeleteSession, onAddNap, onPickNightDate)
         // The night's clock window — when you fell asleep and when you woke — as its own clearly
@@ -832,14 +844,40 @@ private fun Hero(
                 val segments = display.realSegments ?: stageSegments(s)
                 if (segments.isNotEmpty()) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        // Hero strip with the band-min-thickness floor (so a short Awake reads as a
-                        // bar, not a tick) + an onset · midpoint · wake time axis when the session
-                        // gives clock times. Mirrors the Swift Hypnogram(showsTimeAxis:).
-                        HypnogramWithAxis(
-                            stages = segments,
-                            onsetTs = session?.effectiveStartTs,
-                            wakeTs = session?.endTs,
-                        )
+                        // The view switch. Both options draw the SAME segments — this only chooses the
+                        // presentation, and the choice is persisted (SleepDisplayPrefs).
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            SegmentedPillControl(
+                                items = HypnogramStyle.entries.toList(),
+                                selection = hypnogramStyle,
+                                label = { it.label },
+                                onSelect = {
+                                    hypnogramStyle = it
+                                    SleepDisplayPrefs.setHypnogramStyle(context, it)
+                                },
+                            )
+                        }
+                        when (hypnogramStyle) {
+                            // DEFAULT: the classic stepped hypnogram — Wake / REM / Light / Deep rows,
+                            // whole-hour gridlines, the night's SHAPE rather than just its totals.
+                            HypnogramStyle.CURVE -> HypnogramCurve(
+                                stages = segments,
+                                onsetTs = session?.effectiveStartTs,
+                                wakeTs = session?.endTs,
+                                synthesized = display.realSegments == null,
+                            )
+                            // The original hero strip with the band-min-thickness floor (so a short Awake
+                            // reads as a bar, not a tick) + an onset · midpoint · wake time axis when the
+                            // session gives clock times. Mirrors the Swift Hypnogram(showsTimeAxis:).
+                            HypnogramStyle.STRIP -> HypnogramWithAxis(
+                                stages = segments,
+                                onsetTs = session?.effectiveStartTs,
+                                wakeTs = session?.endTs,
+                            )
+                        }
                         // #407 — subordinate movement/restlessness trace UNDER the hypnogram, on the SAME
                         // timeline, for the SAME main-night GROUP blocks the hero resolved (selectNight's
                         // group). Honest empty state when no fragment has persisted motion (older rows).
@@ -1335,6 +1373,250 @@ private fun HypnogramWithAxis(
                     modifier = Modifier.weight(1f),
                 )
             }
+        }
+    }
+}
+
+// MARK: - The stage CURVE — the classic hypnogram (default hero view)
+
+/** How many stage rows the curve stacks: Wake · REM · Light · Deep, top → bottom. */
+internal const val HYPNOGRAM_LEVELS = 4
+
+/** One horizontal run of the stepped curve: a stage held from [startFrac] to [endFrac] of the night's
+ *  width, drawn at row [level] (0 = Wake at the top … 3 = Deep at the bottom). */
+internal data class HypnogramRun(
+    val stage: String,
+    val startFrac: Float,
+    val endFrac: Float,
+    val level: Int,
+)
+
+/** A whole-hour gridline on the curve's time axis: where it sits ([frac] of the night) and the
+ *  wall-clock second it marks (formatted by the caller). */
+internal data class HypnogramTick(val frac: Float, val ts: Long)
+
+/**
+ * Stage → curve row. Depth order, matching the textbook hypnogram: Wake sits at the top and sleep
+ * gets deeper downwards, so the trace DIVES into deep sleep and CLIMBS to REM/Wake. Unknown stages
+ * read as light (the same lenient default [stageColorFor] takes).
+ */
+internal fun hypnogramLevel(stage: String): Int = when (stage.trim().lowercase()) {
+    "awake", "wake" -> 0
+    "rem" -> 1
+    "light" -> 2
+    "deep" -> 3
+    else -> 2
+}
+
+/**
+ * Lay the hero's ordered (stage, minutes) weights out as fractional runs across the night's width —
+ * the same normalise-to-width mapping the strip uses, so BOTH presentations place a given segment at
+ * the identical x. Non-positive / non-finite weights are dropped (they can't occupy width); an empty
+ * or all-zero list yields no runs, and the caller renders the honest empty state.
+ */
+internal fun hypnogramRuns(stages: List<Pair<String, Float>>): List<HypnogramRun> {
+    val weights = stages.map { (_, w) -> if (w.isFinite() && w > 0f) w else 0f }
+    val total = weights.sum()
+    if (total <= 0f) return emptyList()
+    val out = ArrayList<HypnogramRun>(stages.size)
+    var acc = 0f
+    stages.forEachIndexed { i, (name, _) ->
+        val w = weights[i]
+        if (w <= 0f) return@forEachIndexed
+        val start = acc / total
+        acc += w
+        out.add(HypnogramRun(name, start, acc / total, hypnogramLevel(name)))
+    }
+    return out
+}
+
+/**
+ * Whole-hour ticks for the curve's time axis — the "11 pm · midnight · 1 am …" row of the textbook
+ * chart. Steps up through 1/2/3/4/6/12-hour spacing until at most [maxTicks] labels remain, so a
+ * narrow phone never draws them on top of each other. [tzOffsetSec] is the UTC offset the hour
+ * boundaries are taken in (passed explicitly so this stays a pure, testable function); ticks are
+ * placed by fraction of the onset→wake span, which is exactly how the runs are laid.
+ */
+internal fun hypnogramHourTicks(
+    onsetTs: Long,
+    wakeTs: Long,
+    maxTicks: Int,
+    tzOffsetSec: Long,
+): List<HypnogramTick> {
+    val span = wakeTs - onsetTs
+    if (span <= 0L || maxTicks <= 0) return emptyList()
+    val candidates = listOf(1L, 2L, 3L, 4L, 6L, 12L)
+    var chosen: List<HypnogramTick> = emptyList()
+    for (stepHours in candidates) {
+        val stepSec = stepHours * 3600L
+        val local = onsetTs + tzOffsetSec
+        // First whole step at or after onset (floorDiv so pre-1970 / negative locals still round DOWN).
+        var ts = Math.floorDiv(local, stepSec) * stepSec - tzOffsetSec
+        if (ts < onsetTs) ts += stepSec
+        val ticks = ArrayList<HypnogramTick>()
+        while (ts <= wakeTs) {
+            ticks.add(HypnogramTick((ts - onsetTs).toFloat() / span.toFloat(), ts))
+            ts += stepSec
+        }
+        chosen = ticks
+        if (ticks.size <= maxTicks) break
+    }
+    return chosen
+}
+
+/**
+ * The night as a stepped stage CURVE — the hypnogram everyone recognises from a sleep-lab chart:
+ * Wake / REM / Light / Deep stacked top→bottom, the night running left→right, whole-hour gridlines
+ * underneath. Where the strip answers "how MUCH of each stage", this answers "what SHAPE was the
+ * night": the early dive into deep sleep, the REM rebounds that lengthen towards morning, the wake
+ * blips between cycles.
+ *
+ * Drawn from the SAME ordered (stage, minutes) weights the strip uses — no new data, no re-derived
+ * staging — so the two views can never disagree. REM and Deep runs are drawn heavier, mirroring the
+ * highlighted bands of the textbook chart. [synthesized] true means these weights are the
+ * RECONSTRUCTED architecture (stage minutes only, no per-epoch timeline), and the curve says so
+ * rather than passing a schematic off as a recording.
+ */
+@Composable
+private fun HypnogramCurve(
+    stages: List<Pair<String, Float>>,
+    onsetTs: Long?,
+    wakeTs: Long?,
+    synthesized: Boolean,
+) {
+    val runs = remember(stages) { hypnogramRuns(stages) }
+    if (runs.isEmpty()) {
+        Text("No stage breakdown for this night.", style = NoopType.subhead, color = Palette.textTertiary)
+        return
+    }
+    // Hour labels resolved OUTSIDE the draw scope (formatting is not draw work). Empty when the night
+    // has no clock window — the curve then reads as a pure left→right proportional trace.
+    val axis: List<Pair<Float, String>> = remember(onsetTs, wakeTs) {
+        if (onsetTs == null || wakeTs == null || wakeTs <= onsetTs) emptyList()
+        else {
+            val tzOffsetSec = (TimeZone.getDefault().getOffset(onsetTs * 1000L) / 1000).toLong()
+            hypnogramHourTicks(onsetTs, wakeTs, maxTicks = 7, tzOffsetSec = tzOffsetSec)
+                .map { it.frac to clockTimeLabel(it.ts) }
+        }
+    }
+    val chartLabel = buildString {
+        append("Sleep stage curve, ${runs.size} stage ${if (runs.size == 1) "segment" else "segments"}")
+        if (onsetTs != null && wakeTs != null) {
+            append(" from ${clockTimeLabel(onsetTs)} to ${clockTimeLabel(wakeTs)}")
+        }
+    }
+    val hairlineColor = Palette.hairline
+    val traceColor = Palette.textTertiary
+    val labelArgb = Palette.textTertiary.toArgb()
+    val remArgb = Palette.sleepREM.toArgb()
+    val deepArgb = Palette.sleepDeep.toArgb()
+    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space6)) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(Metrics.hypnogramCurveHeight)
+                .semantics { contentDescription = chartLabel },
+        ) {
+            val w = size.width
+            val h = size.height
+            if (w <= 0f || h <= 0f) return@Canvas
+
+            // Density-scaled throughout (dp/sp → px), so the gutter, the labels and the trace keep their
+            // proportions on every screen and honour the user's font scale.
+            val paint = android.graphics.Paint().apply {
+                textSize = 11.sp.toPx()
+                isAntiAlias = true
+            }
+            val fm = paint.fontMetrics
+            // Left gutter holds the row names; the bottom strip holds the hour labels (dropped to a
+            // hairline margin when the night has no clock window).
+            val gutter = 44.dp.toPx()
+            val axisH = if (axis.isEmpty()) 4.dp.toPx() else 16.dp.toPx()
+            val topPad = 6.dp.toPx()
+            val hairlineW = 1.dp.toPx()
+            val plotLeft = gutter
+            val plotW = (w - plotLeft).coerceAtLeast(1f)
+            // Half the heaviest stroke, so a Deep run at the bottom row can't clip into the hour labels.
+            val strokeInset = 2.dp.toPx()
+            val plotBottom = (h - axisH - strokeInset).coerceAtLeast(topPad + 1f)
+            val rowH = (plotBottom - topPad) / (HYPNOGRAM_LEVELS - 1).toFloat()
+            fun yFor(level: Int) = topPad + rowH * level
+
+            // Row gridlines + names. REM and Deep carry their stage tone (the two bands people read the
+            // night by); Wake / Light stay tertiary so the coloured trace, not the axis, holds the eye.
+            listOf(
+                Triple(0, "Wake", labelArgb),
+                Triple(1, "REM", remArgb),
+                Triple(2, "Light", labelArgb),
+                Triple(3, "Deep", deepArgb),
+            ).forEach { (level, name, argb) ->
+                val y = yFor(level)
+                drawLine(hairlineColor, Offset(plotLeft, y), Offset(w, y), strokeWidth = hairlineW)
+                paint.color = argb
+                paint.textAlign = android.graphics.Paint.Align.RIGHT
+                drawContext.canvas.nativeCanvas.drawText(
+                    name,
+                    plotLeft - 6.dp.toPx(),
+                    y - (fm.ascent + fm.descent) / 2f,
+                    paint,
+                )
+            }
+
+            // Whole-hour gridlines + labels, clamped so the first/last label can't clip at the edges.
+            val labelInset = 16.dp.toPx()
+            axis.forEach { (frac, text) ->
+                val x = plotLeft + plotW * frac.coerceIn(0f, 1f)
+                drawLine(hairlineColor, Offset(x, topPad), Offset(x, plotBottom), strokeWidth = hairlineW)
+                paint.color = labelArgb
+                paint.textAlign = android.graphics.Paint.Align.CENTER
+                drawContext.canvas.nativeCanvas.drawText(
+                    text,
+                    x.coerceIn(plotLeft + labelInset, (w - labelInset).coerceAtLeast(plotLeft + labelInset)),
+                    h - 3.dp.toPx(),
+                    paint,
+                )
+            }
+
+            // The trace: a horizontal run per segment at its stage row, joined by faint verticals at
+            // each transition. A very short run (a single epoch of a real staged night) still gets a
+            // ~1.5px sliver so the wake blips read as the spikes they are — never widened past that,
+            // so proportions stay honest.
+            val minRunW = 1.dp.toPx()
+            val runW = 2.dp.toPx()
+            val emphasisW = 3.dp.toPx()
+            var previousLevel: Int? = null
+            runs.forEach { run ->
+                val x0 = plotLeft + plotW * run.startFrac.coerceIn(0f, 1f)
+                val x1 = (plotLeft + plotW * run.endFrac.coerceIn(0f, 1f)).coerceAtLeast(x0 + minRunW)
+                val y = yFor(run.level)
+                previousLevel?.let { prev ->
+                    drawLine(
+                        color = traceColor.copy(alpha = 0.55f),
+                        start = Offset(x0, yFor(prev)),
+                        end = Offset(x0, y),
+                        strokeWidth = hairlineW,
+                    )
+                }
+                // REM (1) and Deep (3) draw heavier — the coloured bands of the textbook hypnogram.
+                val emphasised = run.level == 1 || run.level == 3
+                drawLine(
+                    color = stageColorFor(run.stage),
+                    start = Offset(x0, y),
+                    end = Offset(x1, y),
+                    strokeWidth = if (emphasised) emphasisW else runW,
+                    cap = StrokeCap.Round,
+                )
+                previousLevel = run.level
+            }
+        }
+        if (synthesized) {
+            // HONESTY: no per-epoch timeline was recorded for this night, so the shape is the
+            // reconstructed architecture, not a measurement. Say so under the chart.
+            Text(
+                "Schematic — this night stored stage totals, not a per-epoch timeline.",
+                style = NoopType.footnote,
+                color = Palette.textTertiary,
+            )
         }
     }
 }

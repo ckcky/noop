@@ -37,6 +37,7 @@
     <string name="nav_notifications">Notifications</string>
     <string name="nav_support">Support</string>
     <string name="nav_settings">Settings</string>
+    <string name="nav_profile">Profile</string>
     <string name="nav_test_centre">Test Centre</string>
     <string name="nav_more">More</string>
 
@@ -52,6 +53,17 @@
     <string name="action_start_workout">Start workout</string>
     <string name="action_log_journal">Log journal</string>
     <string name="action_breathe">Breathe</string>
+
+    <!-- Home-screen launcher shortcuts (long-press the app icon). "short" is the label shown under
+         the icon (keep it terse); "long" is the accessibility / wide-layout label. See res/xml/shortcuts.xml. -->
+    <string name="shortcut_live_short">Live HR</string>
+    <string name="shortcut_live_long">Live heart rate</string>
+    <string name="shortcut_workout_short">Workout</string>
+    <string name="shortcut_workout_long">Start a workout</string>
+    <string name="shortcut_journal_short">Journal</string>
+    <string name="shortcut_journal_long">Log your journal</string>
+    <string name="shortcut_settings_short">Settings</string>
+    <string name="shortcut_settings_long">Open settings</string>
 
     <!-- First-run Terms gate (clickwrap). Moved out of TermsGate.kt string literals so the gate is
          localizable (PR #984); English wording kept byte-identical to the macOS/iOS `Terms.points` /

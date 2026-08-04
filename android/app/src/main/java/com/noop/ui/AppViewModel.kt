@@ -707,6 +707,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     flagSet = { NoopPrefs.setEffortRescoreDone(appContext) },
                 )
             }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
+            // IDENTITY FUSION one-shot heal: an install that pressed "Make active" on a strap's REAL id
+            // under an older build scored its pre-switch days against the (empty) active-id stream, so they
+            // are banked thin or missing under the previous lineage. Clear the #836 watermark ONCE so the
+            // first tick below re-runs a full rescore now that the day-owner resolution sees both lineages
+            // (RegistryDayOwnerSource.candidatePriorities). Nothing is deleted here: the rescore wipes and
+            // re-derives only the engine's own computed rows for the window. Latched by a persisted flag,
+            // so the normal fingerprint gate resumes on every later launch.
+            runCatching {
+                if (!NoopPrefs.identityFusionHealDone(appContext)) {
+                    NoopPrefs.runIdentityFusionHeal(appContext)
+                    ble.externalLog(
+                        "Heal (identity fusion): cleared the analyze watermark once so this launch " +
+                            "re-scores the window with both strap lineages visible to the day-owner resolver.",
+                    )
+                }
+            }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
             while (isActive) {
                 // #547 RE-POLLUTION: a sync since the last tick may have flagged a re-heal (its ingest gate
                 // dropped bad-clock records). Re-run the purge BEFORE this tick's rescore so the affected days
@@ -1273,15 +1289,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun loadWorkouts() {
         viewModelScope.launch {
             val now = System.currentTimeMillis() / 1000
-            val whoop = repository.workouts(deviceId, 0L, now)
+            // #1008: read the strap's imported + computed lineages as UNIONS, not one id each. A strap
+            // re-added / made active under its own real id banks new sessions under that id while the
+            // whole earlier history stays canonical, so the single-id reads dropped every workout on the
+            // other side of the switch off this list. Single-WHOOP install ⇒ one id ⇒ same rows as before.
+            val whoop = repository.workoutsUnion(deviceId, 0L, now)
             val apple = repository.workouts("apple-health", 0L, now) +
                 repository.workouts("health-connect", 0L, now)
-            val detected = repository.workouts(repository.computedDeviceId(deviceId), 0L, now)
+            val detected = repository.detectedWorkoutsUnion(deviceId, 0L, now)
             // Imported lifting sessions (Hevy / Liftosaur) carry a volume-load note but no HR — they're
             // a strength-volume estimate, not cardio. Kept OUT of the strap HR-fill below so we never
             // fabricate a heart rate the lift never measured.
             val lifting = repository.workouts(LiftingImporter.SOURCE_ID, 0L, now)
-            val markers = repository.dismissedDetected(deviceId)
+            val markers = repository.dismissedDetectedUnion(deviceId)
             // Fill imported sessions' missing HR from strap samples (#77), same as before; detected /
             // manual rows already carry their own HR so they pass through unchanged. #961: also backfill a
             // strap-native row's Effort (strain) from the strap trace when it's null, so a live/manual
@@ -1363,7 +1383,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (to <= from) return emptyList()
         val span = to - from
         val bucket = (span / 120).coerceIn(15L, 300L)
-        return runCatching { repository.hrBuckets(deviceId, from, to, bucket) }.getOrDefault(emptyList())
+        // #1008: union read — a workout recorded before a strap re-add has its trace under the canonical
+        // id, one after it under the fresh id; a single-id read left the detail HR curve blank on
+        // whichever side the switch put it. Single-WHOOP install ⇒ one id ⇒ byte-identical.
+        return runCatching { repository.hrBucketsUnion(deviceId, from, to, bucket) }.getOrDefault(emptyList())
     }
 
     /** Per-zone MINUTES for a workout window, binning the strap's raw HR samples into the age-derived
@@ -1373,7 +1396,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      *  Mirrors macOS Repository.workoutZoneMinutes. */
     suspend fun workoutZoneMinutes(from: Long, to: Long): List<Double>? {
         if (to <= from) return null
-        val samples = runCatching { repository.hrSamples(deviceId, from, to) }.getOrDefault(emptyList())
+        // #1008: same union as [workoutHrBuckets] — without it a pre-re-add workout produced no zone
+        // split at all (null → the time-in-zone section simply vanished from the detail screen).
+        val samples = runCatching { repository.hrSamplesUnion(deviceId, from, to) }.getOrDefault(emptyList())
         if (samples.isEmpty()) return null
         val age = profileStore.age.toDouble().takeIf { it > 0 } ?: 30.0
         val zoneSet = com.noop.analytics.HrZones.zones(age = age)

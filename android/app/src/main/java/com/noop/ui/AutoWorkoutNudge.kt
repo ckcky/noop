@@ -61,8 +61,20 @@ import java.util.Locale
  * other Today cards (mirrors [DonationNudgeCard] and the iOS source exactly).
  */
 
-/** The strap source the scan + saves use, matching the rest of Today ("my-whoop"). */
-private const val AUTO_DETECT_DEVICE = "my-whoop"
+// The strap source the scan + saves use is the registry's ACTIVE strap id (`vm.activeStrapId`), read
+// through the #1008 union — NOT a hardcoded "my-whoop".
+//
+// This is what silently killed auto-detection. The scan reads the last two days of HR; a strap re-added
+// through the device manager (or made active under its own real id) banks all LIVE raw under that fresh
+// id, so the canonical id it used to read returned ZERO rows for the scan window and the whole path bailed
+// at the `hr.size < 2` guard below — before the detector ever ran. No card, no near-miss, nothing in the
+// Workouts trace: not a tuning problem, an empty input. Reading the union restores it, and a single-WHOOP
+// install resolves to "my-whoop" ⇒ one id ⇒ byte-identical to the old read.
+//
+// The SAVE side had the mirror defect: it wrote the accepted bout under the hardcoded canonical id while
+// the Workouts list reads the active lineage, so a saved suggestion would have landed in a namespace the
+// screen never shows. Saves now go to the same active id the rest of the workout write path uses
+// (AppViewModel.endWorkout), which is also the lineage IntelligenceEngine.rescoreManualWorkouts re-scores.
 
 /** Generic sport label for a saved auto-detected bout — the user can re-label via Workouts → Edit. */
 private const val AUTO_DETECT_SPORT = "Workout"
@@ -184,7 +196,7 @@ fun AutoWorkoutNudgeCard(
                             // until this tap. Mirrors iOS `saveDetectedWorkout`.
                             val durMin = ((w.endSec - w.startSec) / 60L).toInt().coerceAtLeast(1)
                             val row = WorkoutEditing.buildManualRow(
-                                deviceId = AUTO_DETECT_DEVICE,
+                                deviceId = viewModel.activeStrapId,
                                 startSeconds = w.startSec,
                                 durationMin = durMin,
                                 sport = AUTO_DETECT_SPORT,
@@ -228,7 +240,9 @@ private suspend fun autoDetectCandidate(
     val fromSec = nowSec - AUTO_DETECT_DAYS_BACK * 86_400L
     val repo = viewModel.repo
 
-    val hr = repo.hrSamples(AUTO_DETECT_DEVICE, fromSec, nowSec, limit = 200_000)
+    val strapId = viewModel.activeStrapId
+
+    val hr = repo.hrSamplesUnion(strapId, fromSec, nowSec, limit = 200_000)
     if (hr.size < 2) return null
 
     // Resting HR: most recent nightly RHR in history, else the detector's own default (60). Byte-faithful
@@ -237,12 +251,13 @@ private suspend fun autoDetectCandidate(
 
     // Exclude EVERY already-saved workout window (any source — strap/manual, Apple Health, Health Connect,
     // computed "detected" bouts, imported lifting). Matches the iOS `workoutRows()` source union.
-    val computed = repo.computedDeviceId(AUTO_DETECT_DEVICE)
+    // Union reads here too (#1008): an exclusion window missed because it was banked under the other
+    // lineage would let the card re-suggest a bout the user already has saved.
     val saved = (
-        repo.workouts(AUTO_DETECT_DEVICE, fromSec, nowSec) +
+        repo.workoutsUnion(strapId, fromSec, nowSec) +
             repo.workouts("apple-health", fromSec, nowSec) +
             repo.workouts("health-connect", fromSec, nowSec) +
-            repo.workouts(computed, fromSec, nowSec) +
+            repo.detectedWorkoutsUnion(strapId, fromSec, nowSec) +
             repo.workouts("lifting", fromSec, nowSec)
         ).map { it.startTs to it.endTs }
 

@@ -53,6 +53,23 @@ object Palette {
     /** True when the light scheme is active (surface code uses this for the per-scheme idiom). */
     val isLight: Boolean get() = activeIsLight
 
+    /** The liquid-hero card fill the score vessels + count-up numbers float on.
+     *
+     *  It MATCHES the active scheme — a deep, family-hued near-black in DARK, a light frosted card in
+     *  LIGHT — so the hero is dark on a dark theme and light on a light theme. That is what lets the
+     *  hero's labels use the ordinary `Palette.text*` tokens (which flip with the scheme) and stay
+     *  legible in BOTH: a dark hero holds light text, a light hero holds dark text. (The vessels keep
+     *  their own dark interior for the white count-up number, so they read as glass orbs on either.)
+     *  Reads [ThemePrefs.family]/[activeIsLight] (snapshot) so it re-resolves live on a theme change. */
+    val heroFill: Color get() =
+        if (activeIsLight) surfaceRaised.copy(alpha = 0.92f)
+        else ThemePrefs.family.heroFill
+
+    /** The hairline edge of the liquid-hero card: a faint frosted-white edge on the dark hero, the
+     *  theme's hairline on the light hero (a white edge would vanish there). Matches the scheme. */
+    val heroHairline: Color get() =
+        if (activeIsLight) hairline else Color.White.copy(alpha = 0.11f)
+
     // Chart style — when CLASSIC, the DATA accessors below return the throwback red→green ramps
     // (light/dark tuned). Reads ChartStylePrefs.style (snapshot state) so a flip re-colours live.
     val isClassic: Boolean get() = ChartStylePrefs.style == ChartStyle.CLASSIC
@@ -224,6 +241,12 @@ object Palette {
 
     /** Sample the recovery gradient at a recovery score 0..100. */
     fun recoveryColor(score: Double): Color = sample(recoveryStops, (score / 100.0).toFloat())
+
+    /** The shared "how good is this, 0..1" gradient: 1 = ideal (green end), 0 = poor (red end), sampled
+     *  continuously through the SAME theme-aware ramp the recovery score uses ([recoveryColor] IS
+     *  goodnessColor(score/100)). Baseline-banded vitals feed it goodness = 1 − |z|/2, so a vital near its
+     *  personal baseline reads green and one drifting off reads amber→red — scores and vitals on one scale. */
+    fun goodnessColor(goodness: Double): Color = sample(recoveryStops, goodness.coerceIn(0.0, 1.0).toFloat())
 
     /** Sample the strain gradient at an Effort value on the 0..100 scale. */
     fun strainColor(strain: Double): Color = sample(strainStops, (strain / 100.0).toFloat())
@@ -403,6 +426,7 @@ object Metrics {
     val sparkHeight = 22.dp
     val stageStripHeight = 34.dp
     val motionStripHeight = 40.dp   // #407 — the subordinate movement/restlessness trace under the hypnogram
+    val hypnogramCurveHeight = 156.dp   // the stepped Wake/REM/Light/Deep stage curve (the default hero view)
     val trendStripHeight = 120.dp
     val sparklineHeight = 28.dp
     val segmentBarHeight = 18.dp

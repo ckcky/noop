@@ -13,33 +13,61 @@
 #       ANDROID_KEY_ALIAS         – key alias
 #       ANDROID_KEY_PASSWORD      – key password
 #
+# The CHANNEL IS DERIVED FROM WHERE YOU RUN, never chosen — that is what guarantees the invariant and
+# makes stable/preview mixing impossible:
+#
+#   run on the DEFAULT branch (main)  ⇒ STABLE  (the real Choop app, com.kimchai.choop)
+#   run on ANY OTHER branch           ⇒ PREVIEW (the side-by-side "Choop Preview", com.kimchai.choop.preview)
+#
+# A BRANCH RUN PUBLISHES A PRE-RELEASE. It is not just an artifact: it creates the `v<version>-pre`
+# GitHub pre-release with the Preview APK attached, so "Check for updates" inside Choop Preview finds
+# it and installs it in place. (An artifact can't be discovered by the app — it needs a login to
+# download — which is why sideloading a branch build used to be a manual chore.) Channel isolation is
+# unaffected and enforced on BOTH ends: pre-releases are excluded from GitHub's /releases/latest, which
+# is all stable ever reads, and the preview app filters the release list to `prerelease == true`
+# (UpdateCheck.newestPreviewRelease) — so stable finds only stable, preview finds only preview.
+#
+# So the everyday flow is exactly:
+#   1. push a feature branch → dispatch here on that branch → a `v…-pre` PRE-RELEASE is published →
+#      open Choop Preview → Settings → About → Check for updates → Update. Done, in the app.
+#   2. like it → open a PR → merge to main.
+#   3. on main → dispatch here (mode: release-auto) → cut the next STABLE release.
+#
+# Guard rails enforce this: a stable release mode is REJECTED on a branch (stable is cut from main
+# only), so a branch can never become stable and main can never become preview.
+#
+# PREVIEW VERSIONING. A branch preview is versioned `<base>.<run#>`, where <base> is the highest
+# version any published release carries (so it never sits below an older preview even when the branch
+# lags main) and <run#> is the workflow run number, which only ever increases. That makes every
+# preview strictly newer than the last one — the app compares versionName numerically — while still
+# sorting BELOW the next stable patch (8.2.29.1234 < 8.2.30). versionCode gets the same treatment
+# (1000 + run#) so Android never rejects the install as a downgrade.
+#
+# RELEASE NOTES are generated for every release (preview and stable) by tools/release-notes.py from the
+# branch's PR (title + body) or, failing that, its commits. They are written INTO the app
+# (AppChangelog.kt, so the Updates inbox and Settings → What's new show them) *before* the APK is
+# built, and emitted as the GitHub release body (so "Check for updates" shows the same text).
+#
 # Triggers:
-#   • workflow_dispatch – build on demand. Pick a `mode`:
-#       apk-only       – build an installable APK and hand it back as an artifact ONLY. Nothing in
-#                        the repo changes, no tag, no Release. Use this to try a branch. (default)
-#                        (Renamed from `preview` — that word now means the preview CHANNEL below.)
-#       release-auto   – increment the version for you (from the current build.gradle versionName)
-#                        by the chosen `bump` (patch/minor/major), commit the bump, tag it and cut a
-#                        GitHub Release with the APK. No need to look up the last version yourself.
-#       release-manual – release at the exact `version` you type (blank = keep the current version).
-#     And a `channel`:
-#       stable  – the real Choop app (com.kimchai.choop); releases land under /releases/latest.
-#       preview – the side-by-side "Choop Preview" app (com.kimchai.choop.preview); its releases are
-#                 tagged v<version>-pre and marked PRE-RELEASE, so stable installs never see them and
-#                 only the preview app's update check picks them up.
-#   • push of a version tag (v* / android-v*) – build and attach the versioned Choop APK to that
-#     Release. A tag containing "-pre" builds + publishes the preview channel.
+#   • workflow_dispatch – pick a `mode`:
+#       build          – on a branch: publish the preview pre-release (the default, and the only
+#                        thing a branch can do). On main: an artifact-only dry run, no tag/Release.
+#       release-auto   – (main only) bump the build.gradle versionName by `bump`, commit it, tag it,
+#                        cut the GitHub Release. No need to look up the last version.
+#       release-manual – (main only) release at the exact numeric `version` you type.
+#   • push of a version tag (v* / android-v*) – cut a Release for that tag (tags are stable; a
+#     "-pre" tag also publishes a preview release).
 name: Android Release APK
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'apk-only = APK artifact only (no tag/Release). release-auto = bump version from build.gradle. release-manual = use the version field.'
+        description: 'build = on a branch publish the preview pre-release (only option there); on main an artifact-only dry run. release-auto / release-manual = cut a STABLE release — MAIN ONLY.'
         type: choice
-        default: apk-only
+        default: build
         options:
-          - apk-only
+          - build
           - release-auto
           - release-manual
       bump:
@@ -54,13 +82,6 @@ on:
         description: 'release-manual only — numeric-only version like 8.3.0 (no leading "v"). Blank = keep current.'
         type: string
         default: ''
-      channel:
-        description: 'stable = the real Choop (com.kimchai.choop). preview = the side-by-side "Choop Preview" app (com.kimchai.choop.preview); its releases are marked pre-release so stable installs never see them.'
-        type: choice
-        default: stable
-        options:
-          - stable
-          - preview
       build_demo:
         description: 'Also build the sample-data demo flavour (Choop demo APK).'
         type: boolean
@@ -90,6 +111,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags. The release-notes step derives its bullets from `git log` since the
+          # last STABLE tag, and the default shallow checkout (depth 1, no tags) gives it neither:
+          # `git describe` finds nothing and `git log` sees a single commit, so the notes collapsed to
+          # one line — or to nothing once the repeats-the-title filter ran.
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -103,76 +130,99 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Decide the version + whether this run tags & publishes a Release. `apk-only` (the default) leaves
-      # the repo untouched and only exports a filename suffix so a one-off APK is distinguishable from a
-      # real release. `release-auto` increments the current build.gradle versionName by the chosen bump;
-      # `release-manual` uses the typed version. A pushed tag keeps the old behaviour (build current, no
-      # bump, attach to that tag). Nothing here mutates the repo — the bump is a separate, gated step.
+      # Resolve the version, the CHANNEL (derived from the ref — never chosen), and whether this run
+      # publishes a Release. This is the single place that enforces "main ⇒ stable, any branch ⇒
+      # preview, releases from main only". Nothing here mutates the repo — the bump is a separate,
+      # gated step.
       - name: Resolve version
         id: ver
         env:
           MODE: ${{ inputs.mode }}
           BUMP: ${{ inputs.bump }}
           MANUAL: ${{ inputs.version }}
-          CHANNEL_IN: ${{ inputs.channel }}
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}   # for `gh release list` in highest_published_base
         run: |
           set -euo pipefail
-          # Default to `preview` when no mode was submitted. GitHub renders the dispatch FORM from the
-          # workflow on the default branch, so a run on a branch whose form predates these inputs sends
-          # an empty mode — treat that as the safe artifact-only path rather than erroring.
-          MODE="${MODE:-apk-only}"
-          # Channel: the dispatch input, or inferred from a pushed tag ("-pre" ⇒ preview channel).
-          CHANNEL="${CHANNEL_IN:-stable}"
-          if [ "$EVENT" = "push" ] && printf '%s' "$REF_NAME" | grep -q -- '-pre'; then CHANNEL=preview; fi
+          MODE="${MODE:-build}"
+          DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
           CUR=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
           CURCODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
-          echo "Current: versionName=$CUR versionCode=$CURCODE channel=$CHANNEL"
+
+          # The highest x.y.z any PUBLISHED release carries (stable or -pre), so a preview cut from a
+          # branch that lags main still lands ABOVE the newest preview. Without this a branch at 8.2.20
+          # would publish 8.2.20.<run> while the installed preview was already 8.2.29.<older run>, and
+          # the app — which compares versionName numerically — would correctly call it "not newer" and
+          # never offer it. Falls back to the branch's own version when the list is empty/unreachable.
+          highest_published_base() {
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 100 2>/dev/null \
+              | awk '{print $1}' \
+              | sed 's/^v//; s/-pre$//' \
+              | grep -E '^[0-9]+(\.[0-9]+)*$' \
+              | cut -d. -f1-3 \
+              || true
+          }
+
+          bump_version() {
+            IFS=. read -r MA MI PA <<< "$CUR"
+            MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
+            case "$BUMP" in
+              major) MA=$((MA+1)); MI=0; PA=0 ;;
+              minor) MI=$((MI+1)); PA=0 ;;
+              *)     PA=$((PA+1)) ;;
+            esac
+            NEW="${MA}.${MI}.${PA}"; NEWCODE=$((CURCODE+1)); DO_BUMP=true; TAG="v${NEW}"; SUFFIX=""
+          }
+          manual_version() {
+            NEW="${MANUAL:-$CUR}"
+            # versionName must stay numeric-only — UpdateCheck.isNewer parses digits.
+            if ! printf '%s' "$NEW" | grep -qE '^[0-9]+(\.[0-9]+)*$'; then
+              echo "::error::version must be numeric-only like 8.3.0 (no leading 'v'). Got: '$NEW'"; exit 1
+            fi
+            if [ "$NEW" != "$CUR" ]; then NEWCODE=$((CURCODE+1)); DO_BUMP=true; else NEWCODE="$CURCODE"; DO_BUMP=false; fi
+            TAG="v${NEW}"; SUFFIX=""
+          }
 
           if [ "$EVENT" = "push" ]; then
-            # Tag push: build the current source and attach to the pushed tag. No bump.
+            # A pushed tag is a release. Tags are STABLE (they're cut from main); a "-pre" tag is the
+            # single escape hatch for publishing a PREVIEW release. Channel derives from the tag.
+            if printf '%s' "$REF_NAME" | grep -q -- '-pre'; then CHANNEL=preview; else CHANNEL=stable; fi
             NEW="$CUR"; NEWCODE="$CURCODE"; DO_RELEASE=true; DO_BUMP=false; TAG="$REF_NAME"; SUFFIX=""
-          else
+
+          elif [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            # ── main ⇒ STABLE channel ──
+            CHANNEL=stable
             case "$MODE" in
-              apk-only|preview)
-                # Artifact only — nothing tagged, nothing committed. (`preview` accepted as a legacy
-                # alias from stale dispatch forms; it does NOT select the preview channel — use the
-                # `channel` input for that.) Suffix marks the APK as a one-off branch build.
-                NEW="$CUR"; NEWCODE="$CURCODE"; DO_RELEASE=false; DO_BUMP=false; TAG=""; SUFFIX="-${GITHUB_SHA::7}"
-                ;;
-              release-auto)
-                IFS=. read -r MA MI PA <<< "$CUR"
-                MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
-                case "$BUMP" in
-                  major) MA=$((MA+1)); MI=0; PA=0 ;;
-                  minor) MI=$((MI+1)); PA=0 ;;
-                  *)     PA=$((PA+1)) ;;
-                esac
-                NEW="${MA}.${MI}.${PA}"; NEWCODE=$((CURCODE+1)); DO_RELEASE=true; DO_BUMP=true; TAG="v${NEW}"; SUFFIX=""
-                ;;
-              release-manual)
-                NEW="${MANUAL:-$CUR}"
-                # versionName must stay numeric-only — UpdateCheck.isNewer parses digits.
-                if ! printf '%s' "$NEW" | grep -qE '^[0-9]+(\.[0-9]+)*$'; then
-                  echo "::error::version must be numeric-only like 8.3.0 (no leading 'v'). Got: '$NEW'"; exit 1
-                fi
-                if [ "$NEW" != "$CUR" ]; then NEWCODE=$((CURCODE+1)); DO_BUMP=true; else NEWCODE="$CURCODE"; DO_BUMP=false; fi
-                DO_RELEASE=true; TAG="v${NEW}"; SUFFIX=""
-                ;;
-              *)
-                echo "::error::unknown mode '$MODE'"; exit 1 ;;
+              build)         NEW="$CUR"; NEWCODE="$CURCODE"; DO_RELEASE=false; DO_BUMP=false; TAG=""; SUFFIX="-${GITHUB_SHA::7}" ;;
+              release-auto)  bump_version;   DO_RELEASE=true ;;
+              release-manual) manual_version; DO_RELEASE=true ;;
+              *) echo "::error::unknown mode '$MODE'"; exit 1 ;;
             esac
+
+          else
+            # ── any feature branch ⇒ PREVIEW channel, PUBLISHED AS A PRE-RELEASE ──
+            # This is what makes a branch testable from inside the app: a pre-release is public, so
+            # "Check for updates" in Choop Preview can find and install it. Stable can never see it —
+            # GitHub keeps pre-releases out of /releases/latest, and the preview app additionally
+            # filters to prerelease == true.
+            CHANNEL=preview
+            if [ "$MODE" != "build" ]; then
+              echo "::error::STABLE releases are cut from '${DEFAULT_BRANCH}' only. You are on branch '${REF_NAME}', which always publishes a PREVIEW pre-release. Use mode=build here, then merge the PR and run release-auto on ${DEFAULT_BRANCH}."
+              exit 1
+            fi
+            # <base>.<run#>: strictly increasing across every run and branch, and always below the
+            # next stable patch. sort -V picks the highest base among the branch's own version and
+            # every published release's.
+            BASE=$(printf '%s\n' "$CUR" $(highest_published_base) | grep -E '^[0-9]' | sort -V | tail -1)
+            BASE="${BASE:-$CUR}"
+            NEW="${BASE}.${GITHUB_RUN_NUMBER}"
+            NEWCODE=$((1000 + GITHUB_RUN_NUMBER))
+            DO_RELEASE=true; DO_BUMP=false; TAG="v${NEW}-pre"; SUFFIX=""
           fi
 
-          # Preview-channel releases get a "-pre" tag so a later STABLE release of the same version
-          # (e.g. v8.3.0) never collides with its preview cut (v8.3.0-pre), and so the tag itself
-          # signals the channel. Dispatched releases bump the version first, so the tag stays unique.
-          if [ "$CHANNEL" = "preview" ] && [ "$EVENT" != "push" ] && [ -n "$TAG" ]; then
-            TAG="${TAG}-pre"
-          fi
-
-          echo "Resolved: version=$NEW code=$NEWCODE channel=$CHANNEL release=$DO_RELEASE bump=$DO_BUMP tag=${TAG:-<none>} suffix=${SUFFIX:-<none>}"
+          echo "Resolved: ref=$REF_NAME (default=$DEFAULT_BRANCH) version=$NEW code=$NEWCODE channel=$CHANNEL release=$DO_RELEASE bump=$DO_BUMP tag=${TAG:-<none>} suffix=${SUFFIX:-<none>}"
           {
             echo "new_version=$NEW"
             echo "new_code=$NEWCODE"
@@ -189,6 +239,86 @@ jobs:
             echo "- Version: \`$NEW\` (versionCode \`$NEWCODE\`)"
             echo "- Release: \`$DO_RELEASE\`${TAG:+ → tag \`$TAG\`}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Derive this release's notes and write them into BOTH places they have to appear, from one
+      # source, so they can never disagree:
+      #   • app/src/main/java/com/noop/ui/AppChangelog.kt  → compiled into the APK, so the Updates
+      #     inbox row and Settings → About → "What's new" show them offline. Written BEFORE the build.
+      #   • release-notes.md → the GitHub release body, which "Check for updates" reads live.
+      # Source of the text, in order: the PR for this ref (title + its bullet lines), else the commit
+      # subjects since the previous tag. On a stable release the changelog edit is committed by the
+      # bump step below; on a preview it stays a build-time-only edit (the APK carries it, the branch
+      # stays clean).
+      - name: Generate release notes
+        if: ${{ steps.ver.outputs.do_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW: ${{ steps.ver.outputs.new_version }}
+          REF_NAME: ${{ github.ref_name }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          TITLE=""
+          # The OPEN PR whose head is this branch, if there is one. Restricted to --state open on
+          # purpose: branch names get reused, and `gh pr view <branch>` happily resolves a long-MERGED
+          # PR for the same name — which would stamp an old PR's title onto a brand-new release.
+          PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$REF_NAME" --state open \
+            --limit 1 --json title,body --jq '.[0] // empty' 2>/dev/null || echo '')
+          # A STABLE cut runs on main, where no PR has head=main — so the open-PR lookup above finds
+          # nothing and the notes would degrade to raw commit subjects. The release being cut is
+          # exactly the PR that was just merged, so read that one instead. (Most recently merged by
+          # mergedAt, not by creation order.)
+          if [ -z "$PR_JSON" ] && [ "$REF_NAME" = "${DEFAULT_BRANCH:-main}" ]; then
+            PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$REF_NAME" --state merged \
+              --limit 20 --json title,body,mergedAt \
+              --jq 'sort_by(.mergedAt) | reverse | .[0] // empty' 2>/dev/null || echo '')
+          fi
+          if [ -n "$PR_JSON" ]; then
+            TITLE=$(printf '%s' "$PR_JSON" | jq -r '.title // ""')
+            BODY=$(printf '%s' "$PR_JSON" | jq -r '.body // ""')
+            # Only the "What this PR does" section supplies the changelog. A PR body also describes how
+            # the change was TESTED, and those bullets are for reviewers, not for the user's Updates
+            # inbox — reading the whole body would ship "simulated all six ref/mode combinations" as a
+            # release note. Falls back to the whole body when the section is absent (a PR that didn't
+            # use the template).
+            SECTION=$(printf '%s\n' "$BODY" \
+              | awk '/^##[[:space:]]+What this PR does/{f=1;next} f && /^#+[[:space:]]/{exit} f')
+            [ -n "$SECTION" ] || SECTION="$BODY"
+            # Bullet lines ("- x" / "* x"), markdown markers kept — the app renders **bold** and the
+            # release page does too. Checkbox lines are template scaffolding, skipped.
+            printf '%s\n' "$SECTION" \
+              | grep -E '^[[:space:]]*[-*][[:space:]]+' \
+              | grep -vE '^[[:space:]]*[-*][[:space:]]+\[[ xX]\]' \
+              | sed -E 's/^[[:space:]]*[-*][[:space:]]+//' > items.txt || true
+          fi
+          if [ ! -s items.txt ]; then
+            # No PR (or a PR with no bullets): fall back to commit subjects. Measure from the last
+            # STABLE tag, not simply the last tag — every preview build publishes its own `-pre` tag,
+            # so "since the last tag" would shrink to the single commit pushed since the previous
+            # preview. What someone testing a preview actually wants is everything that is in it but
+            # not yet in stable, which is exactly the range since the last stable release.
+            PREV=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-pre' 2>/dev/null || echo '')
+            RANGE="${PREV:+${PREV}..}HEAD"
+            git log --no-merges --pretty=format:'%s' $RANGE | head -20 > items.txt || true
+          fi
+          # Title fallback: the newest commit subject reads far better in the Updates inbox row (which
+          # shows the title alone) than a bare version string.
+          [ -n "$TITLE" ] || TITLE=$(git log -1 --no-merges --pretty=format:'%s' || true)
+          [ -n "$TITLE" ] || TITLE="Choop $NEW"
+          # Drop any bullet that just repeats the title (the common single-commit case), so the notes
+          # never render the same sentence twice.
+          if [ -s items.txt ]; then
+            grep -vxF "$TITLE" items.txt > items.trim.txt || true
+            mv items.trim.txt items.txt
+          fi
+          echo "Release notes title: $TITLE"; echo "--- items ---"; cat items.txt || true
+          python3 tools/release-notes.py \
+            --version "$NEW" \
+            --title "$TITLE" \
+            --changelog app/src/main/java/com/noop/ui/AppChangelog.kt \
+            --out-md release-notes.md < items.txt
+          echo "--- release body ---"; cat release-notes.md
 
       # Only for a real release: write the new versionName/versionCode into build.gradle.kts and commit
       # the bump back to the branch you dispatched, so the tag, the Release and the APK's OWN version all
@@ -207,7 +337,10 @@ jobs:
           echo "After bump:"; grep -nE 'versionName|versionCode' app/build.gradle.kts | head -3
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Android: release v${NEW} (versionCode ${NEWCODE})" app/build.gradle.kts
+          # The generated changelog entry rides along on a STABLE release, so main permanently records
+          # what shipped (a preview's entry stays build-time-only — see "Generate release notes").
+          git add app/build.gradle.kts app/src/main/java/com/noop/ui/AppChangelog.kt
+          git commit -m "Android: release v${NEW} (versionCode ${NEWCODE})"
           git push origin "HEAD:${BRANCH}"
           echo "BUMP_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
@@ -241,12 +374,19 @@ jobs:
         env:
           CHANNEL: ${{ steps.ver.outputs.channel }}
           BRANCH: ${{ github.ref_name }}
+          NEW: ${{ steps.ver.outputs.new_version }}
+          NEWCODE: ${{ steps.ver.outputs.new_code }}
         run: |
           # Git provenance for the in-app build stamp (BuildConfig.GIT_SHA/GIT_BRANCH — shown in the
           # preview app's Today header so a screenshot answers "which build is this?").
           GITPROPS="-PchoopGitSha=${GITHUB_SHA::7} -PchoopGitBranch=${BRANCH}"
           if [ "$CHANNEL" = "preview" ]; then
-            ./gradlew assemblePreviewRelease -PchoopVersionCodeOverride=$((1000 + GITHUB_RUN_NUMBER)) $GITPROPS
+            # The APK must carry the SAME version the pre-release is tagged with, or the app would
+            # install v8.2.29.1234 and then still report the release as "available" forever.
+            ./gradlew assemblePreviewRelease \
+              -PchoopVersionNameOverride="$NEW" \
+              -PchoopVersionCodeOverride="$NEWCODE" \
+              $GITPROPS
           else
             ./gradlew assembleFullRelease $GITPROPS
           fi
@@ -323,15 +463,45 @@ jobs:
           echo "Publishing release $TAG at $TARGET_SHA (channel: $CHANNEL)"
           # Preview releases are marked PRE-RELEASE: GitHub's /releases/latest then excludes them,
           # so the stable app's update check never offers a preview build; the preview app reads the
-          # full release list and picks them up.
+          # full release list, keeps only prerelease == true, and picks them up.
           EXTRA=""
-          NOTES="Automated Choop release build. Install $APK_NAME (updates in place over an existing Choop install signed with the same key)."
+          FOOTER="Install $APK_NAME (updates in place over an existing Choop install signed with the same key)."
           if [ "$CHANNEL" = "preview" ]; then
             EXTRA="--prerelease"
-            NOTES="Choop PREVIEW channel build — installs side-by-side with stable Choop as \"Choop Preview\". Install $APK_NAME. Keep your strap paired to stable Choop; feed Preview via a .noopbak import (see android/MIGRATION.md)."
+            FOOTER="Choop PREVIEW channel build — installs side-by-side with stable Choop as \"Choop Preview\". Update from inside the app: Settings → About → Check for updates. Keep your strap paired to stable Choop; feed Preview via a .noopbak import (see android/MIGRATION.md)."
           fi
-          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          # Body = the generated notes (the same text the app shows) + the install footer. The app's
+          # cleanNotes() cuts at "Downloads", so the footer is separated by that heading and never
+          # clutters the in-app update card.
+          # Both files live in the job's working directory (android/), where the notes step wrote them.
+          BODY_FILE=release-body.md
+          if [ -f release-notes.md ]; then cp release-notes.md "$BODY_FILE"; else : > "$BODY_FILE"; fi
+          printf '\n## Downloads\n\n%s\n' "$FOOTER" >> "$BODY_FILE"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$REPO" --notes-file "$BODY_FILE" $EXTRA
+          else
             gh release create "$TAG" --repo "$REPO" --target "$TARGET_SHA" --title "$TAG" $EXTRA \
-              --notes "$NOTES"
+              --notes-file "$BODY_FILE"
           fi
           gh release upload "$TAG" "../dist/$APK_NAME" --clobber --repo "$REPO"
+
+      # Keep the release list readable: every branch build publishes a pre-release, so without pruning
+      # they accumulate forever. Stable releases are NEVER touched — only `*-pre` tags, and only the
+      # ones older than the newest few. The app is unaffected either way (it always takes the newest).
+      - name: Prune old preview pre-releases
+        if: ${{ steps.ver.outputs.do_release == 'true' && steps.ver.outputs.channel == 'preview' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          KEEP=8
+          # Newest-first by creation, pre-releases only, drop the ones past the keep window.
+          OLD=$(gh release list --repo "$REPO" --limit 100 --json tagName,isPrerelease,createdAt \
+            --jq "[.[] | select(.isPrerelease) ] | sort_by(.createdAt) | reverse | .[${KEEP}:] | .[].tagName")
+          if [ -z "$OLD" ]; then echo "nothing to prune"; exit 0; fi
+          echo "$OLD" | while read -r t; do
+            [ -n "$t" ] || continue
+            echo "pruning $t"
+            gh release delete "$t" --repo "$REPO" --cleanup-tag --yes || true
+          done

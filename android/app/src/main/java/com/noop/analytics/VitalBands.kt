@@ -27,7 +27,7 @@ object VitalBands {
     /** How the band was judged — drives the tile's caption wording. */
     enum class Basis(val raw: String) { PERSONAL("personal"), POPULATION("population") }
 
-    data class Result(val band: Band, val basis: Basis, val nights: Int)
+    data class Result(val band: Band, val basis: Basis, val nights: Int, val goodness: Double? = null)
 
     /** |z| at or below this is in-range vs the personal baseline (~95% of the user's own
      *  normal nights; the |z| <= 1 of [Baselines.deviation] would flag ~32% — too noisy for
@@ -49,30 +49,54 @@ object VitalBands {
         populationRange: ClosedFloatingPointRange<Double>,
         cfg: MetricCfg?,
     ): Result {
-        if (value == null) return Result(Band.NO_DATA, Basis.POPULATION, 0)
+        // Coarse goodness (0..1) for the population path, before a trusted personal baseline exists: a
+        // reading inside the typical range reads solidly green (0.85), outside amber-orange (0.35). The
+        // personal path below replaces this with the continuous, calibrated gradient.
+        fun popGoodness(inRange: Boolean): Double = if (inRange) 0.85 else 0.35
+
+        if (value == null) return Result(Band.NO_DATA, Basis.POPULATION, 0, goodness = null)
         if (cfg == null) {
+            val inRange = populationRange.contains(value)
             return Result(
-                if (populationRange.contains(value)) Band.IN_RANGE else Band.OUT_OF_RANGE,
-                Basis.POPULATION, 0,
+                if (inRange) Band.IN_RANGE else Band.OUT_OF_RANGE,
+                Basis.POPULATION, 0, goodness = popGoodness(inRange),
             )
         }
         val state = Baselines.foldHistory(history, cfg)
         // Absolute-plausibility outer guard: a value outside the physiological bounds is
         // out-of-range no matter how wide the personal spread happens to be.
         if (!(cfg.minVal <= value && value <= cfg.maxVal)) {
-            return Result(Band.OUT_OF_RANGE, Basis.POPULATION, state.nValid)
+            return Result(Band.OUT_OF_RANGE, Basis.POPULATION, state.nValid, goodness = 0.05)
         }
         if (state.trusted) {   // >= 14 valid nights and not stale
             val z = Baselines.deviation(value, state).z
             return Result(
                 if (abs(z) <= sigmaK) Band.IN_RANGE else Band.OUT_OF_RANGE,
                 Basis.PERSONAL, state.nValid,
+                goodness = personalGoodness(z),
             )
         }
+        val inRange = populationRange.contains(value)
         return Result(
-            if (populationRange.contains(value)) Band.IN_RANGE else Band.OUT_OF_RANGE,
-            Basis.POPULATION, state.nValid,
+            if (inRange) Band.IN_RANGE else Band.OUT_OF_RANGE,
+            Basis.POPULATION, state.nValid, goodness = popGoodness(inRange),
         )
+    }
+
+    /**
+     * Maps a personal-baseline z-score to a ramp position (0..1) CALIBRATED so a normal in-range reading
+     * reads GREEN, not mid-ramp amber. The whole in-range band (|z| <= sigmaK) sits in the green zone
+     * [0.78 .. 1.0]; only genuine out-of-range readings ease down through amber to red, reaching red at
+     * |z| = 3·sigmaK. (A flat 1 − |z|/sigmaK parked a perfectly normal |z| = 1 night at 0.5 — the amber
+     * middle — which is why every in-range vital looked alarmingly orange.)
+     */
+    fun personalGoodness(z: Double): Double {
+        val zn = abs(z) / sigmaK   // 0 on baseline, 1 at the in/out boundary
+        return if (zn <= 1.0) {
+            1.0 - 0.22 * zn                                    // in-range → [0.78 .. 1.0] (green)
+        } else {
+            (0.78 * (1.0 - (zn - 1.0) / 2.0)).coerceIn(0.0, 1.0)  // out → 0.78 down to 0 by |z| = 3·sigmaK
+        }
     }
 
     // ── Skin temp (mixed semantics: absolute °C from CSV import vs ±°C on-device deviation) ──
