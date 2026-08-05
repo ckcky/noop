@@ -721,8 +721,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     profile = currentProfile(),
                     importedDeviceId = deviceId,
                     maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
-                    flagGet = { NoopPrefs.causalChargeRescoreDone(appContext) },
-                    flagSet = { NoopPrefs.setCausalChargeRescoreDone(appContext) },
+                    // Versioned, not a boolean latch: a scoring change bumps SCORING_VERSION, so the
+                    // stored history is brought onto the new definition exactly once per version. The old
+                    // boolean fired on the build that introduced it and then swallowed every later fix.
+                    flagGet = {
+                        NoopPrefs.chargeRescoreUpToDate(appContext, IntelligenceEngine.SCORING_VERSION)
+                    },
+                    flagSet = {
+                        NoopPrefs.setChargeRescoreCompleted(
+                            appContext, IntelligenceEngine.SCORING_VERSION,
+                            System.currentTimeMillis() / 1000L,
+                        )
+                    },
                     ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
                     baselineEpoch = NoopPrefs.of(appContext)
                         .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
@@ -1331,8 +1341,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     profile = currentProfile(),
                     importedDeviceId = deviceId,
                     maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
-                    flagGet = { NoopPrefs.causalChargeRescoreDone(appContext) },
-                    flagSet = { NoopPrefs.setCausalChargeRescoreDone(appContext) },
+                    flagGet = {
+                        NoopPrefs.chargeRescoreUpToDate(appContext, IntelligenceEngine.SCORING_VERSION)
+                    },
+                    flagSet = {
+                        NoopPrefs.setChargeRescoreCompleted(
+                            appContext, IntelligenceEngine.SCORING_VERSION,
+                            System.currentTimeMillis() / 1000L,
+                        )
+                    },
                     force = true,
                     ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
                     baselineEpoch = NoopPrefs.of(appContext)

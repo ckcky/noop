@@ -712,18 +712,37 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_EFFORT_RESCORE_DONE, true).apply()
     }
 
-    /** Whether the one-shot FULL-history causal-Charge rescore has run. Charge is now scored against the
-     *  baseline as it stood strictly BEFORE each night, but a normal pass only covers the trailing 21 days,
-     *  so without this one-shot the recent window would sit on the new definition while older days kept the
-     *  values the old whole-history fold produced. Set true once the full-history pass completes so it never
-     *  repeats; the Settings "Recalculate all Charge scores" button re-runs it on demand (force = true). */
-    const val KEY_CAUSAL_CHARGE_RESCORE_DONE = "noop.causalChargeRescore.done"
+    /**
+     * The [com.noop.analytics.IntelligenceEngine.SCORING_VERSION] the last COMPLETED full-history Charge
+     * rescore ran at (0 = never). A normal pass only re-scores the trailing window, so without this the
+     * recent days would sit on the current definition while everything older kept values from a
+     * superseded one.
+     *
+     * This replaces a plain boolean latch, which had exactly that failure: it fired once, on the build
+     * that introduced it, and every later scoring fix found it already set and skipped. Comparing a
+     * monotone version instead means a bump always triggers one more pass, and never more than one.
+     */
+    const val KEY_CHARGE_RESCORE_VERSION = "noop.chargeRescore.completedVersion"
 
-    fun causalChargeRescoreDone(context: Context): Boolean =
-        of(context).getBoolean(KEY_CAUSAL_CHARGE_RESCORE_DONE, false)
+    /** When that rescore completed (epoch SECONDS, 0 = never). Surfaced in Settings so "did it actually
+     *  run?" is answerable from the app instead of inferred from how long ago the update was. */
+    const val KEY_CHARGE_RESCORE_AT = "noop.chargeRescore.completedAt"
 
-    fun setCausalChargeRescoreDone(context: Context) {
-        of(context).edit().putBoolean(KEY_CAUSAL_CHARGE_RESCORE_DONE, true).apply()
+    fun chargeRescoreCompletedVersion(context: Context): Int =
+        of(context).getInt(KEY_CHARGE_RESCORE_VERSION, 0)
+
+    fun chargeRescoreCompletedAt(context: Context): Long =
+        of(context).getLong(KEY_CHARGE_RESCORE_AT, 0L)
+
+    /** True when the stored history has already been scored at [version] or later. */
+    fun chargeRescoreUpToDate(context: Context, version: Int): Boolean =
+        chargeRescoreCompletedVersion(context) >= version
+
+    fun setChargeRescoreCompleted(context: Context, version: Int, atSeconds: Long) {
+        of(context).edit()
+            .putInt(KEY_CHARGE_RESCORE_VERSION, version)
+            .putLong(KEY_CHARGE_RESCORE_AT, atSeconds)
+            .apply()
     }
 
     /** Whether the one-shot IDENTITY-FUSION heal has run. An install that pressed "Make active" on a

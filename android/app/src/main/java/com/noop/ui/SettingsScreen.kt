@@ -95,6 +95,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
 import com.noop.analytics.Baselines
+import com.noop.analytics.IntelligenceEngine
 import com.noop.analytics.Zones
 import com.noop.ble.PuffinExperiment
 import com.noop.ble.WhoopModel
@@ -1344,6 +1345,13 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                         "Rebuilds every day's Charge from your stored data, so your whole history uses the current scoring. Nothing is deleted and your baseline is not reset. Takes a minute or two in the background.",
                         style = NoopType.footnote,
                         color = Palette.textTertiary,
+                    )
+                    // "Did it actually run?" answerable in the app. Without this the only way to tell was
+                    // to guess from how long ago the update was installed.
+                    Text(
+                        chargeRescoreStatusLine(context, recalculatingCharge),
+                        style = NoopType.footnote,
+                        color = Palette.textSecondary,
                     )
                 }
                 NoopButton(
@@ -2780,4 +2788,32 @@ private fun AttributionRow(repo: String, note: String) {
         Text(repo, style = NoopType.mono(12f), color = Palette.textPrimary)
         Text("· $note", style = NoopType.footnote, color = Palette.textTertiary)
     }
+}
+
+/**
+ * One line under "Recalculate all Charge scores" saying whether the stored history has actually been
+ * scored with the CURRENT algorithm, and when.
+ *
+ * WHY: the full-history rescore runs in the background with no visible trace, so "did it happen?" was
+ * only answerable by guessing from how long ago the update was installed. Worse, the first version
+ * latched on a boolean, so a later scoring fix silently skipped it and left old days on a superseded
+ * algorithm with nothing on screen to say so. This states the fact, including the case where a rescore
+ * is still OWED.
+ *
+ * Pure read of two prefs; no work, safe to call on every recomposition.
+ */
+private fun chargeRescoreStatusLine(context: android.content.Context, running: Boolean): String {
+    if (running) return "Recalculating your history now…"
+    val done = NoopPrefs.chargeRescoreCompletedVersion(context)
+    val at = NoopPrefs.chargeRescoreCompletedAt(context)
+    if (done < IntelligenceEngine.SCORING_VERSION) {
+        // Either never run, or run at an older scoring version — both mean older days may still carry
+        // numbers the current algorithm would not produce.
+        return "Your history has not been rebuilt for the current scoring yet."
+    }
+    if (at <= 0L) return "Your history is up to date with the current scoring."
+    val stamp = java.time.Instant.ofEpochSecond(at)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("d MMM, HH:mm", java.util.Locale.getDefault()))
+    return "Last rebuilt $stamp — up to date with the current scoring."
 }

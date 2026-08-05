@@ -235,6 +235,26 @@ object IntelligenceEngine {
     const val EFFORT_RESCORE_HISTORY_DAYS: Int = 4000
 
     /**
+     * Version of the CHARGE SCORING behaviour. **Bump this whenever a change alters the number a given
+     * day's data produces** , then every install runs exactly one fresh full-history rescore and the whole
+     * record lands on the new definition together.
+     *
+     * WHY IT EXISTS: the first cut of the causal-Charge migration latched on a plain boolean
+     * (`noop.causalChargeRescore.done`). It fired once, on the build that introduced it, and every later
+     * scoring fix then found the latch already set and skipped , so a routine pass re-scored only the
+     * trailing [analyzeRecent] window while everything older kept values from the SUPERSEDED algorithm.
+     * The user saw exactly that: recent days correct, days weeks back still carrying the old numbers or
+     * no Charge at all. A monotone version compared against the persisted "last completed" value cannot
+     * fail that way , a bump always means one more pass, and never more than one.
+     *
+     * History:
+     *   1 , causal (strictly-prior) baselines
+     *   2 , same day set on every pass (`ownerSource` on all callers)
+     *   3 , baseline folded from the stored history instead of the scan window
+     */
+    const val SCORING_VERSION: Int = 3
+
+    /**
      * One-shot, on-upgrade FULL-history Effort rescore (#313 PART B). The Effort hero gauge + numbers
      * moved from the old 0–21 axis to Choop's own 0–100 axis. On-device computed rows since v2.6.0 already
      * store 0–100, but rows the engine computed on an OLDER build (capped at [maxDays] per run, so deep
