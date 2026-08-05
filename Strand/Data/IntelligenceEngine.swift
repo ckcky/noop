@@ -670,14 +670,28 @@ final class IntelligenceEngine: ObservableObject {
         var histHrvByDay: [String: Double?] = [:]
         var histRhrByDay: [String: Double?] = [:]
         var histRespByDay: [String: Double?] = [:]
+        // BASE LAYER: every night ever derived, read from the store over the WHOLE history. Without this
+        // a night was in the baseline only while it sat inside the pass's trailing scan window, so each
+        // midnight the oldest night dropped out, the fold re-anchored on a different first night, and
+        // every stored score shifted by about a point. `maxDays` must not decide what we measure against.
+        let computedHist = ((try? await store.dailyMetrics(deviceId: computedId,
+                                                           from: "0000-01-01", to: "9999-12-31")) ?? [])
+        for d in computedHist {
+            histHrvByDay[d.day] = d.avgHrv
+            histRhrByDay[d.day] = d.restingHr.map(Double.init)
+            histRespByDay[d.day] = d.respRateBpm
+        }
+        // Freshly derived values for the days THIS pass re-read: the same quantity as the base layer, one
+        // derivation newer, so they replace it for exactly those days.
+        for (day, v) in nightlyHrvByDay { histHrvByDay[day] = v }
+        for (day, v) in nightlyRhrByDay { histRhrByDay[day] = v }
+        for (day, v) in nightlyRespByDay { histRespByDay[day] = v }
+        // IMPORTED values win last, per day , the documented merge precedence, unchanged.
         for d in hist {
             histHrvByDay[d.day] = d.avgHrv
             histRhrByDay[d.day] = d.restingHr.map(Double.init)
             histRespByDay[d.day] = d.respRateBpm
         }
-        for (day, v) in nightlyHrvByDay where histHrvByDay[day] == nil { histHrvByDay[day] = v }
-        for (day, v) in nightlyRhrByDay where histRhrByDay[day] == nil { histRhrByDay[day] = v }
-        for (day, v) in nightlyRespByDay where histRespByDay[day] == nil { histRespByDay[day] = v }
         // rhr/resp/skin honour the Charge-wide recalibration epoch (noop.recoveryBaselineEpoch); 0 = no-op,
         // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
         // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
@@ -688,8 +702,11 @@ final class IntelligenceEngine: ObservableObject {
         let rhrSeq = rhrDayKeys.map { histRhrByDay[$0]! }
         let respDayKeys = histRespByDay.keys.sorted()
         let respSeq = respDayKeys.map { histRespByDay[$0]! }
-        // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
-        // so fold purely over the pass-1 nightly means in chronological order.
+        // KNOWN REMNANT (mirrors Android): skin temp still folds over THIS PASS's window only, because
+        // the daily row stores the deviation rather than the nightly mean and a deviation cannot be
+        // re-folded into the baseline it was measured against. Persisting the mean needs a schema column.
+        // wSkinTemp = 0.05 and the term drops unless its baseline is usable, so the residual window
+        // dependence here is roughly a twentieth of what HRV's was.
         let skinDayKeys = nightlySkinByDay.keys.sorted()
         let skinSeq = skinDayKeys.map { nightlySkinByDay[$0]! }
         // ── CAUSAL baselines: each night is scored against who the person was BEFORE it ────────────────
