@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "8.2.32"
+    const val CURRENT_VERSION = "8.2.34"
 
     data class Release(
         val version: String,
@@ -36,6 +36,26 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "8.2.34",
+            title = "Home-screen shortcuts for the app icon",
+            date = "August 2026",
+            items = listOf(
+                "**Long-press the app icon for quick actions.** Choop's home-screen icon now has shortcuts — press and hold it to jump straight to **Live HR**, **Start workout**, your **Journal**, or **Settings**, instead of opening the app and finding the screen yourself. They work whichever app icon you've picked.",
+            ),
+        ),
+        Release(
+            version = "8.2.33",
+            title = "Workout detection works again, and your older workouts are back on the list",
+            date = "August 2026",
+            items = listOf(
+                "**Workout detection works again.** Since the strap was re-added and made active under its own id, the \"Looks like a workout\" scan was reading heart rate from the old source, where nothing new had been written. It found zero samples for the last two days and gave up before the detector ever ran, so no suggestion could ever appear. It now reads both sources, so bouts are spotted again.",
+                "**Your older workouts are back on the Workouts list.** The list was reading only the re-added strap's own data, so every session recorded before the switch quietly disappeared. Both sides are read now and the full history shows again, with each session appearing once.",
+                "**Workout graphs and zones fill in again.** Opening an older workout showed an empty heart-rate curve and no time-in-zone breakdown, because its trace lives with the earlier data. The detail screen now finds the trace wherever it was recorded, which also restores the average, peak and Effort those older sessions were missing.",
+                "**Dismissed suggestions stay dismissed.** A bout you marked \"Not a workout\" before the switch could reappear, because the dismissal was filed against the previous source. Dismissals from both are honoured again.",
+                "**Saving a suggestion now keeps it.** An accepted suggestion was filed under the old source while the Workouts list read the new one, so it would not have shown up. Saves now go where the list reads them.",
+            ),
+        ),
         Release(
             version = "8.2.32",
             title = "Sleep: bring the movement detail back after a strap switch",
