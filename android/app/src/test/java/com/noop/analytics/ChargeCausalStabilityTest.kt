@@ -164,6 +164,44 @@ class ChargeCausalStabilityTest {
         )
     }
 
+    /**
+     * The sliding-window drift, pinned.
+     *
+     * Real failure (user's log, app 8.2.32.80): every pass scanned exactly `2026-07-12 .. 2026-08-01`,
+     * the trailing 21 days counted back from today. With no imported rows, a night was in the baseline
+     * only because that pass scanned it — so at midnight the window became `07-13 .. 08-02`, the oldest
+     * night fell out, the fold re-seeded on a different first night, and every stored score moved ~1
+     * point. Confirmed twice over: scores shifted +0.5..+1.0 across the whole window overnight, and the
+     * "Calibrating" boundary walked forward day by day (16 Jul, then 21 Jul five days later) instead of
+     * staying pinned to the start of the history.
+     *
+     * The fix reads the nights from the persisted record rather than from the scan window. This test pins
+     * the property that makes that necessary: drop the oldest night, and a much later day moves.
+     */
+    @Test
+    fun droppingTheOldestNightMovesAMuchLaterDaysBaseline() {
+        // A history that actually varies — a flat one would make this pass vacuously, since dropping a
+        // night identical to its neighbours moves nothing.
+        val varied: List<Double?> = listOf(
+            64.0, 61.0, 58.0, 57.0, 55.0, 59.0, 53.0, 56.0, 54.0, 52.0,
+            57.0, 51.0, 55.0, 53.0, 50.0, 54.0, 49.0, 52.0, 48.0, 51.0, 47.0,
+        )
+        val full = IntelligenceEngine.PriorBaselines(days, varied, hrvCfg).before("2026-07-28")
+        // Same history with the first night gone — exactly what one midnight does to a trailing window.
+        val slid = IntelligenceEngine.PriorBaselines(days.drop(1), varied.drop(1), hrvCfg).before("2026-07-28")
+
+        assertTrue(
+            "losing the oldest night must change how many count toward a later day's baseline",
+            full.nValid != slid.nValid,
+        )
+        // The seed carries real weight: at a 14-night half-life it still holds ~35% after 21 nights, so
+        // re-seeding is not a rounding effect.
+        assertTrue(
+            "re-seeding the fold visibly moves a later day's baseline",
+            abs(full.baseline - slid.baseline) > 0.01,
+        )
+    }
+
     @Test
     fun anEmptyHistoryIsNotUsableSoNoScoreIsFabricated() {
         val prior = IntelligenceEngine.PriorBaselines(emptyList(), emptyList(), hrvCfg)

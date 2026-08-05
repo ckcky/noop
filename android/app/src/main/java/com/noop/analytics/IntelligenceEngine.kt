@@ -427,16 +427,11 @@ object IntelligenceEngine {
         // keeping memory bounded over a full multi-night offload history.
         val scoredNights = ArrayList<DayResult>()
 
-        // In-memory nightly values harvested in pass 1, used to seed the pass-2 baseline.
-        // Keyed by day so the union with imported history de-dupes cleanly per UTC day.
-        val nightlyHrvByDay = LinkedHashMap<String, Double?>()
-        val nightlyRhrByDay = LinkedHashMap<String, Double?>()
         // Wear-gated nightly skin-temp means (on-device only , imported rows carry the deviation, not
         // the raw mean, so the skin-temp baseline is seeded purely from these). (PR #85)
+        // The ONLY driver still harvested in memory: HRV / resting HR / respiration are persisted columns
+        // and are read back over the whole history below.
         val nightlySkinByDay = LinkedHashMap<String, Double?>()
-        // On-device RSA respiration estimates, unioned with imported respRateBpm below to seed the
-        // resp baseline the recovery composite's wResp=0.05 term scores against.
-        val nightlyRespByDay = LinkedHashMap<String, Double?>()
 
         // Floor `now` to LOCAL midnight (#277) so each `dayStart` lands on a local-day boundary and the
         // day keys are LOCAL calendar days, consistent with the dashboard's local "today" lookup. A
@@ -614,13 +609,15 @@ object IntelligenceEngine {
                 }
             }
 
-            // Harvest the baseline-independent nightly aggregates (a day with no detected
-            // sleep yields null → recorded as a missing night, i.e. skip-and-hold). The raw
-            // streams (hr/rr/...) go out of scope here and are freed before the next night.
-            nightlyHrvByDay[day] = res.daily.avgHrv
-            nightlyRhrByDay[day] = res.daily.restingHr?.toDouble()
+            // Harvest the nightly SKIN-TEMP mean. HRV / resting HR / respiration are NOT harvested here
+            // any more: they are persisted columns on the daily row, so the baseline reads them back from
+            // the store over the WHOLE history instead of only the days this pass happened to scan.
+            // Skin temp has no such column (the row stores the DEVIATION, not the mean, and a deviation
+            // can't be re-folded into the baseline it was measured against), so it still folds over this
+            // pass's window only. With wSkinTemp = 0.05 and the term gated on a usable baseline the
+            // residual is small, but it is a real remnant of the window dependence — see the note at the
+            // baseline fold below. The raw streams go out of scope here and are freed before the next night.
             nightlySkinByDay[day] = res.nightlySkinTempC
-            nightlyRespByDay[day] = res.daily.respRateBpm
             // ── RHR floor-vs-mean diagnostic (#691) ────────────────────────────────────────────────
             // Make the recurring "Choop's resting HR reads LOWER than my sleeping-HR app" reports
             // explainable from the strap log instead of a guess. The two numbers measure different
@@ -640,86 +637,6 @@ object IntelligenceEngine {
             }
             scoredNights.add(res)
         }
-
-        // ── Seed the baseline from the UNION of imported nightly history + the nightly
-        // values just computed. This is the recovery fix: the "-noop" nightly avgHrv/
-        // restingHr that already exist (and are re-derived identically here) finally feed
-        // the baseline, so a BLE-only user crosses Baselines.minNightsSeed (4 valid nights)
-        // and recovery lights up. We fold over the in-memory pass-1 values rather than
-        // re-reading repo.days(computedId) to avoid a read-before-persist ordering hazard.
-        // Chronological (oldest-first) replay: a day present in both takes the computed value.
-        val histHrvByDay = LinkedHashMap<String, Double?>()
-        val histRhrByDay = LinkedHashMap<String, Double?>()
-        val histRespByDay = LinkedHashMap<String, Double?>()
-        for (d in hist) {
-            histHrvByDay[d.day] = d.avgHrv
-            histRhrByDay[d.day] = d.restingHr?.toDouble()
-            histRespByDay[d.day] = d.respRateBpm
-        }
-        // Imported (cloud) nightly values WIN per day: the on-device estimate only fills days the
-        // import doesn't cover AT ALL, so an import user's baseline is unchanged. Use a key-absence
-        // check, NOT putIfAbsent: Java's putIfAbsent treats a key mapped to NULL as absent, so an
-        // imported day whose avgHrv/restingHr is blank would be REPLACED by the computed estimate —
-        // diverging from the Swift mirror (`histHrvByDay[day] == nil` is true only when the KEY is
-        // absent), which keeps that imported day as a missing night. HRV/RHR are the dominant
-        // recovery drivers (~60%/~20%), so this substitution skewed Charge vs iOS. (The author already
-        // fixed this for the low-weight resp term below; HRV/RHR were missed.)
-        for ((day, v) in nightlyHrvByDay) if (day !in histHrvByDay) histHrvByDay[day] = v
-        for ((day, v) in nightlyRhrByDay) if (day !in histRhrByDay) histRhrByDay[day] = v
-        for ((day, v) in nightlyRespByDay) if (day !in histRespByDay) histRespByDay[day] = v
-        // Sort once so the HRV values + their "yyyy-MM-dd" day keys stay parallel (same order/length) for
-        // the recalibration-aware foldHistory below.
-        val hrvSorted = histHrvByDay.entries.sortedBy { it.key }
-        val hrvSeq = hrvSorted.map { it.value }
-        val hrvDayKeys = hrvSorted.map { it.key }
-        val rhrSorted = histRhrByDay.entries.sortedBy { it.key }
-        val rhrSeq = rhrSorted.map { it.value }
-        val rhrDayKeys = rhrSorted.map { it.key }
-        val respSorted = histRespByDay.entries.sortedBy { it.key }
-        val respSeq = respSorted.map { it.value }
-        val respDayKeys = respSorted.map { it.key }
-        // ── CAUSAL baselines: each night is scored against who the person was BEFORE it ────────────────
-        // Previously all four drivers were folded into ONE terminal state and EVERY day in the window was
-        // scored against it. That made a finished day's Charge depend on nights that came AFTER it, so
-        // each of the many daily rescores (the 15-min backstop, every offload chunk, every sleep edit)
-        // rewrote the stored score with a slightly different number — a day could read 54 in the evening
-        // and 45 the next day off identical inputs. [Baselines.foldHistoryPrefix] hands back the state as
-        // it stood before each night instead, which makes a day's score a pure function of its OWN night
-        // plus strictly-earlier ones: causal, and idempotent under re-running.
-        //
-        // Per-metric, over that metric's OWN sorted key list — deliberately NOT a unified key set. Padding
-        // a metric's absent days with nulls would advance nightsSinceUpdate and could flip a baseline to
-        // STALE, which silently drops the term (BaselineState.usable excludes STALE).
-        //
-        // HRV baseline honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via
-        // their parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
-        // A 0.0 epoch is byte-identical to the plain fold, so scoring is unchanged until the user taps it.
-        val hrvPrior = PriorBaselines(hrvDayKeys, hrvSeq, hrvCfg, baselineEpoch)
-        val rhrPrior = PriorBaselines(rhrDayKeys, rhrSeq, rhrCfg, recoveryEpoch)
-        // Resp baseline mixes imported (cloud) values with on-device RSA estimates , acceptable: the
-        // z-score is scale-tolerant, foldHistory winsorizes, and respRateBpm already carries no source
-        // flag anywhere else (the illness gate treats it the same way). Gated on `usable` because
-        // RecoveryScorer includes the resp term whenever a baseline object is present , a CALIBRATING
-        // (<4-night) baseline would let one noisy RSA night move recovery (mirrors the skin-temp
-        // use-site gate; honest cold-start). The gate now applies to the PRIOR state, per day.
-        val respPrior = PriorBaselines(respDayKeys, respSeq, respCfg, recoveryEpoch)
-        // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
-        // so fold purely over the pass-1 nightly means in chronological order. (PR #85)
-        // Gated on `usable` for consistency with the resp baseline above AND the Swift reference
-        // (IntelligenceEngine.swift `skinFold.usable ? skinFold : nil`) , the use-site re-checks
-        // `usable` too, so this is belt-and-suspenders, but it keeps the platforms byte-aligned.
-        val skinSorted = nightlySkinByDay.entries.sortedBy { it.key }
-        val skinSeq = skinSorted.map { it.value }
-        val skinDayKeys = skinSorted.map { it.key }
-        val skinPrior = PriorBaselines(skinDayKeys, skinSeq, skinCfg, recoveryEpoch)
-
-        // The four Charge baselines as they stood strictly BEFORE `day`.
-        fun baselinesBefore(day: String) = ProfileBaselines(
-            hrv = hrvPrior.before(day),
-            restingHR = rhrPrior.before(day),
-            resp = respPrior.before(day).takeIf { it.usable },
-            skinTemp = skinPrior.before(day).takeIf { it.usable },
-        )
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
         // user who BOTH has real sessions AND wears the strap doesn't see the same session twice (the
@@ -790,15 +707,104 @@ object IntelligenceEngine {
             .appleDaily(WhoopRepository.APPLE_HEALTH_SOURCE, "0000-01-01", "9999-12-31")
             .map { it.day }.toHashSet()
 
-        for (res in scoredNights) {
-            // Substitute an edited block's (reshaped) stages for its detected twin before the daily
-            // sleep aggregate feeds Rest + recovery. No edit touching this night → `daily` is unchanged.
-            val daily = sleepEditedDaily(
+        // ── Pass 2a: settle each night's aggregates, then PERSIST them before any baseline is read ─────
+        // Substitute an edited block's (reshaped) stages for its detected twin, so the values that feed
+        // Rest + Charge honour the edit. No edit touching a night → its row is unchanged.
+        val settled = scoredNights.map { res ->
+            res to sleepEditedDaily(
                 res.daily, res.sleepSessions, editsByStart, editOnsetByStart,
                 tzOffsetSeconds, habitualMidsleepSec,
             )
-            // The baselines as they stood BEFORE this night — the same state every later pass will
-            // resolve for this day, which is what makes the re-score idempotent.
+        }
+
+        // WRITE BEFORE READ. The baseline below reads the nightly values back from the STORE, over the
+        // whole history — so the values this pass just derived have to be in the store first, or the fold
+        // would use the previous pass's numbers for exactly the days it just recomputed. Writing first
+        // leaves one source of truth instead of reconciling an in-memory set against a stored one.
+        //
+        // The rows written here are COMPLETE: fresh aggregates plus the scores carried forward from the
+        // existing row, so an interrupted pass can never blank a score. Pass 2b rewrites them with the
+        // new scores moments later.
+        val existingByDay = repo.dailyMetrics(computedId, "0000-01-01", "9999-12-31").associateBy { it.day }
+        repo.upsertDailyMetrics(
+            settled.map { (_, daily) ->
+                val prev = existingByDay[daily.day]
+                daily.copy(
+                    deviceId = computedId,
+                    recovery = prev?.recovery,
+                    skinTempDevC = prev?.skinTempDevC,
+                )
+            },
+        )
+
+        // ── CAUSAL baselines over the WHOLE history ────────────────────────────────────────────────────
+        // Two properties, both required, and each one alone leaves the score drifting:
+        //
+        //  ORDER  — a night is scored against the state as it stood strictly BEFORE it
+        //           ([Baselines.foldHistoryPrefix]), never against a fold that already contains it or the
+        //           nights after it. Without this a good night retroactively demoted the days before it.
+        //  MEMBERSHIP — the nights come from the persisted record of every night ever derived, not from
+        //           whatever days this pass happened to scan. Without this the trailing scan window
+        //           decided the baseline: each midnight the oldest night dropped out, the fold re-anchored
+        //           on a different first night, and every stored score moved by about a point.
+        //
+        // Together: a day's score is a pure function of its own night plus the nights before it. Same day,
+        // same data, same number — whatever triggered the pass, whatever its window size, whenever it runs.
+        //
+        // Imported (cloud) values still WIN per day over the on-device estimate: the computed history is
+        // laid down first and the imported rows overwrite the days they cover, which is the documented
+        // merge precedence, not a new rule. Key-absence checks, NOT putIfAbsent: a key mapped to NULL must
+        // stay a missing night rather than being refilled.
+        val histHrvByDay = LinkedHashMap<String, Double?>()
+        val histRhrByDay = LinkedHashMap<String, Double?>()
+        val histRespByDay = LinkedHashMap<String, Double?>()
+        for (d in repo.computedDaysUnion(importedDeviceId)) {
+            histHrvByDay[d.day] = d.avgHrv
+            histRhrByDay[d.day] = d.restingHr?.toDouble()
+            histRespByDay[d.day] = d.respRateBpm
+        }
+        for (d in hist) {
+            histHrvByDay[d.day] = d.avgHrv
+            histRhrByDay[d.day] = d.restingHr?.toDouble()
+            histRespByDay[d.day] = d.respRateBpm
+        }
+        // Sort once so each metric's values and its "yyyy-MM-dd" keys stay parallel for the fold.
+        val hrvSorted = histHrvByDay.entries.sortedBy { it.key }
+        val rhrSorted = histRhrByDay.entries.sortedBy { it.key }
+        val respSorted = histRespByDay.entries.sortedBy { it.key }
+        // Per metric over that metric's OWN key list — deliberately NOT a unified key set. Padding a
+        // metric's absent days with nulls would advance nightsSinceUpdate and could flip a baseline to
+        // STALE, which silently drops the term (BaselineState.usable excludes STALE).
+        //
+        // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via their
+        // parallel day keys, so a manual Recalibrate restarts the whole Charge build-up together.
+        val hrvPrior = PriorBaselines(hrvSorted.map { it.key }, hrvSorted.map { it.value }, hrvCfg, baselineEpoch)
+        val rhrPrior = PriorBaselines(rhrSorted.map { it.key }, rhrSorted.map { it.value }, rhrCfg, recoveryEpoch)
+        // Resp mixes imported values with on-device RSA estimates , acceptable: the z-score is
+        // scale-tolerant and the fold winsorizes. Gated on `usable` because RecoveryScorer includes the
+        // term whenever a baseline object is present, and a CALIBRATING (<4-night) baseline would let one
+        // noisy night move Charge. The gate applies to the PRIOR state, per day.
+        val respPrior = PriorBaselines(respSorted.map { it.key }, respSorted.map { it.value }, respCfg, recoveryEpoch)
+        // KNOWN REMNANT: skin temp still folds over THIS PASS's window only, because the daily row stores
+        // the deviation rather than the nightly mean and a deviation cannot be re-folded into the baseline
+        // it was measured against. Persisting the mean needs a schema column; until then this one driver
+        // keeps the old window dependence. It carries wSkinTemp = 0.05 and is dropped entirely unless its
+        // baseline is usable, so the residual is roughly a twentieth of what HRV's was , real, but small.
+        val skinSorted = nightlySkinByDay.entries.sortedBy { it.key }
+        val skinPrior = PriorBaselines(skinSorted.map { it.key }, skinSorted.map { it.value }, skinCfg, recoveryEpoch)
+
+        // The four Charge baselines as they stood strictly BEFORE `day`.
+        fun baselinesBefore(day: String) = ProfileBaselines(
+            hrv = hrvPrior.before(day),
+            restingHR = rhrPrior.before(day),
+            resp = respPrior.before(day).takeIf { it.usable },
+            skinTemp = skinPrior.before(day).takeIf { it.usable },
+        )
+
+        // ── Pass 2b: score each night against the baseline that stood before it ────────────────────────
+        for ((res, daily) in settled) {
+            // The same state every later pass will resolve for this day — that is what makes re-scoring
+            // an exact no-op instead of a rewrite.
             val priorBaselines = baselinesBefore(daily.day)
             val recovery = recomputeRecovery(daily, priorBaselines)
             // Charge term-breakdown trace (Test Centre Group G): only when the Recovery test mode is on

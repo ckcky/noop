@@ -865,6 +865,24 @@ class WhoopRepository(private val dao: WhoopDao) {
     }
 
     /**
+     * The COMPUTED ("-noop") daily rows across the whole history, both strap lineages unioned
+     * (active-first, exactly like [daysUnion]). Oldest first.
+     *
+     * This is the durable record of every night Choop has ever derived: `avgHrv`, `restingHr`,
+     * `respRateBpm`. The Charge baseline is folded from THIS, not from whatever days a given analyze pass
+     * happened to re-read, so a day's baseline no longer depends on the pass's scan window. Before this,
+     * a night existed in the baseline only while it sat inside the trailing 21-day window — so every
+     * midnight the oldest night dropped out, the rolling average re-anchored on a different first night,
+     * and every stored score shifted by about a point. Unbounded on purpose: one row per day, so a
+     * multi-year history is ~1000 rows, negligible next to the raw-sample reads the same pass performs.
+     */
+    suspend fun computedDaysUnion(activeDeviceId: String): List<DailyMetric> {
+        val ids = computedSourceIds(activeDeviceId)
+        if (ids.size == 1) return dao.days(ids[0])
+        return unionByDay(ids.map { dao.days(it) }).sortedBy { it.day }
+    }
+
+    /**
      * One-time #34 refile: move legacy Health Connect data out of the shared "apple-health" bucket into
      * its own "health-connect" source, so it stops being shown as Apple Health. HC workouts are tagged
      * `source = "health-connect"` so they move unconditionally; the daily aggregates only move when there

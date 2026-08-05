@@ -2656,19 +2656,35 @@ private fun SynthesisHeroCard(
             // S4 (#205): the one-word readiness read kept on the hero now the full Readiness card folded
             // into the Charge-ring tap. Push / Maintain / Rest; hidden when there isn't enough history.
             // Tapping it opens the Charge breakdown, where the full Readiness card now lives.
-            val readinessLevel = remember(days) {
+            // Readiness for the DAY ON SCREEN, not for the wall-clock today. This anchored on
+            // logicalDayKeyNow(), so navigating to a past day still showed today's verdict — a Tuesday in
+            // July could read PUSH because this morning does. The engine already takes the anchor day;
+            // it was simply never given the selected one.
+            val readinessAnchor = readDay?.day ?: logicalDayKeyNow()
+            val readinessLevel = remember(days, readinessAnchor) {
                 if (days.isEmpty()) ReadinessEngine.Level.INSUFFICIENT
-                else ReadinessEngine.evaluate(days, today = logicalDayKeyNow()).level
+                else ReadinessEngine.evaluate(days, today = readinessAnchor).level
             }
             readinessWord(readinessLevel)?.let { word ->
                 ReadinessHeroPill(word = word, level = readinessLevel, onTap = onOpenReadiness)
             }
-            // SOLID only when TODAY's own row carries a settled recovery, a carried prior-day read is
-            // honestly still CALIBRATING for today, matching the iOS pill (keyed on displayDay.recovery).
-            val todayRecovery = day?.recovery
+            // The REAL three-state confidence for the day on screen. This was a bare "has a score / has
+            // none" test, so BUILDING could never appear and a day standing on a four-night baseline
+            // claimed SOLID exactly like one standing on twenty. [chargeConfidenceTier] reads the tier off
+            // the same strictly-prior HRV baseline the score itself used, so the pill and the number can
+            // no longer disagree.
+            val confidence = remember(days, readDay) { chargeConfidenceTier(days, readDay) }
             StatePill(
-                title = if (todayRecovery != null) "SOLID" else "CALIBRATING",
-                tone = if (todayRecovery != null) StrandTone.Accent else StrandTone.Neutral,
+                title = when (confidence) {
+                    ScoreConfidence.SOLID -> "SOLID"
+                    ScoreConfidence.BUILDING -> "BUILDING"
+                    ScoreConfidence.CALIBRATING -> "CALIBRATING"
+                },
+                tone = when (confidence) {
+                    ScoreConfidence.SOLID -> StrandTone.Accent
+                    ScoreConfidence.BUILDING -> StrandTone.Warning
+                    ScoreConfidence.CALIBRATING -> StrandTone.Neutral
+                },
             )
         }
         // S4: the Synthesis card collapses to a one-liner that expands on tap. The headline (the status) is
