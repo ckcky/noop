@@ -117,13 +117,6 @@ fun BreatheScreen(viewModel: DesktopAppViewModel) {
     var sessionRrValues by remember { mutableStateOf<List<Int>>(emptyList()) }
     var showResults by remember { mutableStateOf(false) }
 
-    val pacer = remember(selectedPace) {
-        BreathPacer(
-            inhaleSec = selectedPace.inhaleSeconds(),
-            exhaleSec = selectedPace.exhaleSeconds(),
-        )
-    }
-
     // Session timer + breath counter
     LaunchedEffect(running) {
         while (running) {
@@ -516,7 +509,7 @@ private fun SessionResults(
         NoopCard(tint = Palette.restColor) {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Overline("Session complete")
-                Text("${pace.label}", style = NoopType.title3, color = Palette.textPrimary)
+                Text("${pace.label}", style = NoopType.title2, color = Palette.textPrimary)
                 Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap)) {
                     StatTile(
                         modifier = Modifier.weight(1f),

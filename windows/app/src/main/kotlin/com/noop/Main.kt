@@ -4,6 +4,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -49,8 +53,13 @@ fun main() {
     //    thread until the EDT has run the init, so by the time `application` opens the window the
     //    database is open, the ViewModel is created, and the preferences are loaded — no race, no
     //    flash, no null-ViewModel window.
+    var initError: String? = null
     SwingUtilities.invokeAndWait {
-        NoopApplication.init(dbPath)
+        runCatching { NoopApplication.init(dbPath) }
+            .onFailure { err ->
+                err.printStackTrace()
+                initError = err.message ?: err.javaClass.simpleName
+            }
     }
 
     // 3. Launch the Compose Desktop application window.
@@ -84,9 +93,8 @@ fun main() {
             window.iconImage = createAppIcon()
 
             // The process-wide ViewModel is guaranteed non-null here (init ran via invokeAndWait
-            // before `application`), but the null guard keeps the window safe if init is ever
-            // skipped or fails. The key(viewModelVersion) forces a full recomposition (new AppRoot
-            // + new ViewModel reference) after a backup-restore reinit.
+            // before `application`), but the null guard keeps the window safe if init failed —
+            // in that case an error screen is shown instead of a blank window.
             val appViewModel = NoopApplication.viewModel
             if (appViewModel != null) {
                 androidx.compose.runtime.key(viewModelVersion) {
@@ -99,6 +107,21 @@ fun main() {
                                 onReinit = { viewModelVersion++ },
                             )
                         }
+                    }
+                }
+            } else {
+                // Init failed — show a user-friendly error screen instead of a blank window.
+                NoopTheme {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = "Failed to start: ${initError ?: "Unknown error"}\n\n" +
+                                "Check the database at:\n$dbPath",
+                            color = androidx.compose.ui.graphics.Color.Red,
+                            textAlign = TextAlign.Center,
+                        )
                     }
                 }
             }

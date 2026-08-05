@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Air
@@ -98,7 +99,7 @@ enum class StressBand(val title: String, val tone: StrandTone) {
     }
 }
 
-object StressModel {
+object StressModelBuilder {
     /**
      * Build the model from recent days + an optional stored "stress" series.
      * Returns null when there is insufficient baseline data (< 7 days of RHR+HRV).
@@ -243,7 +244,7 @@ fun StressScreen(viewModel: DesktopAppViewModel) {
         storedLoaded = true
     }
 
-    val model = remember(days, stored) { StressModel.build(days, stored) }
+    val model = remember(days, stored) { StressModelBuilder.build(days, stored) }
 
     LazyScreenScaffold(
         title = "Stress",
@@ -548,7 +549,7 @@ private fun StressLoading() {
 private fun StressEmpty() {
     NoopCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Not enough data yet", style = NoopType.title3, color = Palette.textPrimary)
+            Text("Not enough data yet", style = NoopType.title2, color = Palette.textPrimary)
             Text(
                 "Stress monitoring needs at least 7 days of resting HR and HRV data to establish a baseline. " +
                     "Keep syncing your strap to build up your history.",
