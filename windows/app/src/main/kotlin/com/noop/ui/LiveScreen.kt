@@ -92,14 +92,16 @@ fun LiveScreen(
                 )
                 Text("bpm", style = NoopType.footnote, color = Palette.textTertiary)
 
-                // Connection pill
+                // Connection pill — distinguish "connected but bonding" from "fully connected"
                 val tone = when {
-                    live.connected -> StrandTone.Positive
-                    live.bonded -> StrandTone.Warning
+                    activeConnection -> StrandTone.Positive
+                    isConnecting -> StrandTone.Warning
                     else -> StrandTone.Critical
                 }
                 val connLabel = when {
-                    live.connected -> "Connected"
+                    activeConnection -> "Connected"
+                    live.connected && !live.bonded -> "Bonding…"
+                    live.scanning -> "Scanning…"
                     live.bonded -> "Bonded — not streaming"
                     else -> "Disconnected"
                 }
@@ -185,7 +187,7 @@ fun LiveScreen(
                         text = live.statusNote ?: "Connecting…",
                         kind = NoopButtonKind.Secondary,
                         leadingIcon = Icons.Filled.Bluetooth,
-                        onClick = {},
+                        onClick = { viewModel.disconnect() },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 } else {

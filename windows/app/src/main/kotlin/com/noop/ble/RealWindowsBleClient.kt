@@ -375,31 +375,31 @@ class RealWindowsBleClient(
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isBlank()) continue
-                // Log stderr as a diagnostic event
-                _state.update { it.copy(statusNote = "[bridge] $line") }
+                // Route stderr to the diagnostic console; do NOT overwrite statusNote
+                // (which is managed by parseBridgeEvent) to avoid race conditions
+                // where a diagnostic line clobbers an important status like "Connected".
+                System.err.println("[bridge-stderr] $line")
             }
         } catch (e: IOException) {
             // ignore
         }
     }
 
-    // ── JSON event parser (lightweight, no external JSON lib needed) ────────
+    // ── JSON event parser (using org.json for robust parsing) ────────────
 
     private fun parseBridgeEvent(line: String) {
-        // Minimal JSON field extraction (avoids pulling in a JSON lib).
-        // Each event is a flat JSON object on one line.
-        val event = jsonField(line, "event") ?: return
+        val json = runCatching { org.json.JSONObject(line) }.getOrNull() ?: return
+        val event = json.optString("event")
+        if (event.isEmpty()) return
 
         when (event) {
             "scanResult" -> {
-                val name = jsonField(line, "name")
-                val address = jsonField(line, "address") ?: return
-                val rssi = jsonFieldInt(line, "rssi", -100)
-                // Store the first found device for auto-connect
+                val name = json.optString("name", null)
+                val address = json.optString("address", null) ?: return
+                val rssi = json.optInt("rssi", -100)
                 if (currentAddress == null) {
                     currentAddress = address
                 }
-                // Collect into the scan results list
                 synchronized(scanResults) {
                     scanResults.add(ScanResult(deviceName = name, mac = address, rssi = rssi))
                 }
@@ -418,7 +418,7 @@ class RealWindowsBleClient(
 
             "connected" -> {
                 connected = true
-                val name = jsonField(line, "name")
+                val name = json.optString("name", null)
                 _state.update {
                     it.copy(
                         connected = true,
@@ -450,10 +450,11 @@ class RealWindowsBleClient(
             }
 
             "hr" -> {
-                val bpm = jsonFieldInt(line, "bpm", 0)
+                val bpm = json.optInt("bpm", 0)
                 if (bpm in 30..220) {
-                    // Extract RR intervals from the JSON array
-                    val rrs = jsonArray(line, "rr")
+                    val rrs = json.optJSONArray("rr")?.let { arr ->
+                        (0 until arr.length()).mapNotNull { i -> arr.optInt(i, 0).takeIf { it > 0 } }
+                    } ?: emptyList()
                     _state.update {
                         it.withHeartRate(bpm).withRRIntervals(rrs)
                     }
@@ -461,25 +462,24 @@ class RealWindowsBleClient(
             }
 
             "battery" -> {
-                val pct = jsonFieldDouble(line, "pct", -1.0)
+                val pct = json.optDouble("pct", -1.0)
                 if (pct >= 0) {
                     _state.update { it.copy(batteryPct = pct) }
                 }
             }
 
             "strapEvent" -> {
-                val name = jsonField(line, "name") ?: "UNKNOWN"
-                val code = jsonFieldInt(line, "code", -1)
-                val ts = jsonFieldLong(line, "timestamp", 0L)
+                val name = json.optString("name", "UNKNOWN")
+                val code = json.optInt("code", -1)
+                val ts = json.optLong("timestamp", 0L)
                 _state.update {
                     it.copy(lastEvent = "$name($code)")
                 }
-                // Handle specific events
                 when (name) {
                     "WRIST_ON" -> _state.update { it.copy(worn = true) }
                     "WRIST_OFF" -> _state.update { it.copy(worn = false) }
                     "BATTERY_LEVEL" -> {
-                        val pct = jsonFieldDouble(line, "pct", -1.0)
+                        val pct = json.optDouble("pct", -1.0)
                         if (pct >= 0) _state.update { it.copy(batteryPct = pct) }
                     }
                     "BLE_BONDED" -> _state.update { it.withBonded(encrypted = true) }
@@ -487,9 +487,9 @@ class RealWindowsBleClient(
             }
 
             "syncProgress" -> {
-                val phase = jsonField(line, "phase") ?: "offloading"
-                val processed = jsonFieldInt(line, "processed", 0)
-                val msg = jsonField(line, "message")
+                val phase = json.optString("phase", "offloading")
+                val processed = json.optInt("processed", 0)
+                val msg = json.optString("message", null)
                 _syncProgress.value = SyncProgress(
                     isRunning = true,
                     phase = phase,
@@ -503,16 +503,21 @@ class RealWindowsBleClient(
             }
 
             "historicalDataBatch" -> {
-                // Decode the Base64-encoded frame array and forward to the callback.
-                // The C# bridge batches frames between HISTORY_START and HISTORY_END.
-                val frames = jsonBase64Array(line, "frames")
+                val frames = json.optJSONArray("frames")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { i ->
+                        val b64 = arr.optString(i, "")
+                        if (b64.isNotEmpty()) {
+                            runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull()
+                        } else null
+                    }
+                } ?: emptyList()
                 if (frames.isNotEmpty()) {
                     historicalDataCallback?.onHistoricalDataBatch(frames)
                 }
             }
 
             "syncComplete" -> {
-                val processed = jsonFieldInt(line, "processed", 0)
+                val processed = json.optInt("processed", 0)
                 _syncProgress.value = SyncProgress(
                     isRunning = false,
                     phase = "idle",
@@ -526,25 +531,24 @@ class RealWindowsBleClient(
                         lastSyncAt = System.currentTimeMillis() / 1000,
                     )
                 }
-                // Fire the sync-complete callback so the app can trigger post-sync analysis.
                 syncCompleteCallback?.onSyncComplete(processed)
             }
 
             "consoleLog" -> {
-                val text = jsonField(line, "text") ?: return
-                // Extract firmware version from console logs
+                val text = json.optString("text", "")
+                if (text.isEmpty()) return
                 extractFirmwareVersion(text)
             }
 
             "log" -> {
-                val msg = jsonField(line, "msg") ?: ""
+                val msg = json.optString("msg", "")
                 if (msg.isNotEmpty()) {
                     _state.update { it.copy(statusNote = msg) }
                 }
             }
 
             "error" -> {
-                val msg = jsonField(line, "msg") ?: "Unknown error"
+                val msg = json.optString("msg", "Unknown error")
                 _state.update { it.copy(statusNote = "Error: $msg") }
             }
         }
@@ -564,112 +568,18 @@ class RealWindowsBleClient(
         }
     }
 
-    // ── Minimal JSON helpers (no external dependency) ──────────────────────
-
-    private fun jsonField(json: String, key: String): String? {
-        val pattern = "\"$key\""
-        val idx = json.indexOf(pattern)
-        if (idx < 0) return null
-        var i = idx + pattern.length
-        // skip whitespace and colon
-        while (i < json.length && (json[i] == ':' || json[i] == ' ')) i++
-        if (i >= json.length) return null
-        return when {
-            json[i] == '"' -> {
-                // String value
-                val end = json.indexOf('"', i + 1)
-                if (end < 0) return null
-                json.substring(i + 1, end)
-            }
-            json[i] == '{' -> {
-                // Nested object — find matching close brace
-                var depth = 0
-                var j = i
-                while (j < json.length) {
-                    when (json[j]) {
-                        '{' -> depth++
-                        '}' -> { depth--; if (depth == 0) return json.substring(i, j + 1) }
-                    }
-                    j++
-                }
-                null
-            }
-            else -> {
-                // Number or literal
-                val end = json.indexOfAny(charArrayOf(',', '}', ' '), i)
-                if (end < 0) json.substring(i) else json.substring(i, end)
-            }
-        }
-    }
-
-    private fun jsonFieldInt(json: String, key: String, default: Int): Int {
-        val v = jsonField(json, key) ?: return default
-        return v.toIntOrNull() ?: default
-    }
-
-    private fun jsonFieldLong(json: String, key: String, default: Long): Long {
-        val v = jsonField(json, key) ?: return default
-        return v.toLongOrNull() ?: default
-    }
-
-    private fun jsonFieldDouble(json: String, key: String, default: Double): Double {
-        val v = jsonField(json, key) ?: return default
-        return v.toDoubleOrNull() ?: default
-    }
-
-    private fun jsonArray(json: String, key: String): List<Int> {
-        val pattern = "\"$key\""
-        val idx = json.indexOf(pattern)
-        if (idx < 0) return emptyList()
-        var i = idx + pattern.length
-        while (i < json.length && (json[i] == ':' || json[i] == ' ')) i++
-        if (i >= json.length || json[i] != '[') return emptyList()
-        val end = json.indexOf(']', i)
-        if (end < 0) return emptyList()
-        val inner = json.substring(i + 1, end).trim()
-        if (inner.isEmpty()) return emptyList()
-        return inner.split(',').mapNotNull { it.trim().toIntOrNull() }
-    }
-
-    /**
-     * Extract a JSON array of Base64 strings and decode each to a ByteArray.
-     * Used for the "frames" field in historicalDataBatch events.
-     */
-    private fun jsonBase64Array(json: String, key: String): List<ByteArray> {
-        val pattern = "\"$key\""
-        val idx = json.indexOf(pattern)
-        if (idx < 0) return emptyList()
-        var i = idx + pattern.length
-        while (i < json.length && (json[i] == ':' || json[i] == ' ')) i++
-        if (i >= json.length || json[i] != '[') return emptyList()
-        val result = mutableListOf<ByteArray>()
-        while (i < json.length) {
-            // Find the next quoted string
-            val start = json.indexOf('"', i)
-            if (start < 0) break
-            val end = json.indexOf('"', start + 1)
-            if (end < 0) break
-            val b64 = json.substring(start + 1, end)
-            if (b64.isNotEmpty()) {
-                runCatching {
-                    result.add(java.util.Base64.getDecoder().decode(b64))
-                }
-            }
-            i = end + 1
-            // Check if next char is ',' (more items) or ']' (end)
-            val next = json.indexOfAny(charArrayOf(',', ']'), i)
-            if (next < 0 || json[next] == ']') break
-            i = next + 1
-        }
-        return result
-    }
-
     // ── Cleanup ─────────────────────────────────────────────────────────────
 
     fun shutdown() {
         sendCommand("""{"cmd":"shutdown"}""")
         readerThread?.cancel()
-        process?.destroyForcibly()
+        // Give the bridge process a moment to flush pending writes and exit cleanly
+        // before forcibly terminating it (prevents WAL corruption / half-written data).
+        process?.let { proc ->
+            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
+            }
+        }
         process = null
         writer = null
         readerThread = null

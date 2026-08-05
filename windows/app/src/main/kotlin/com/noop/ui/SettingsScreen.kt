@@ -17,12 +17,12 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Csv
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Straighten
+import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -409,7 +409,7 @@ fun SettingsScreen(
                 )
                 HorizontalDivider(color = Palette.hairline)
                 SettingRow(
-                    icon = Icons.Filled.Csv,
+                    icon = Icons.Filled.TableChart,
                     title = "Export CSV",
                     subtitle = "Export raw sensor data (last 24h) to a CSV file for analysis.",
                 )
@@ -711,7 +711,7 @@ private fun CsvExportButton(
                 CsvExportStatus.Working -> "Exporting CSV…"
                 else -> "Export raw sensor CSV"
             },
-            leadingIcon = Icons.Filled.Csv,
+            leadingIcon = Icons.Filled.TableChart,
             kind = NoopButtonKind.Secondary,
             fullWidth = true,
             enabled = status !is CsvExportStatus.Working,
