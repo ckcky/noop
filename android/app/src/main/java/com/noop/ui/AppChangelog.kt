@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "8.2.34"
+    const val CURRENT_VERSION = "8.2.35"
 
     data class Release(
         val version: String,
@@ -36,6 +36,19 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "8.2.35",
+            title = "feat: Windows desktop client (Compose Multiplatform + BLE bridge)",
+            date = "August 2026",
+            items = listOf(
+                "Charge: version the full-history rescore, and show whether it ran",
+                "Charge: mirror the stored-history baseline in Swift",
+                "Charge: fold the baseline from the stored history, not the scan window",
+                "Charge: resolve the same day set on every analyze pass",
+                "Charge: count only prior nights in the calibrating countdown",
+                "Charge: score each night against the baseline as it stood before it",
+            ),
+        ),
         Release(
             version = "8.2.34",
             title = "Home-screen shortcuts for the app icon",
