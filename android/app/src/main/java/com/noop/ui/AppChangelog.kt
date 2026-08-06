@@ -38,15 +38,14 @@ object AppChangelog {
     val releases: List<Release> = listOf(
         Release(
             version = "8.2.35",
-            title = "feat: Windows desktop client (Compose Multiplatform + BLE bridge)",
+            title = "Charge stops changing after the day is over",
             date = "August 2026",
             items = listOf(
-                "Charge: version the full-history rescore, and show whether it ran",
-                "Charge: mirror the stored-history baseline in Swift",
-                "Charge: fold the baseline from the stored history, not the scan window",
-                "Charge: resolve the same day set on every analyze pass",
-                "Charge: count only prior nights in the calibrating countdown",
-                "Charge: score each night against the baseline as it stood before it",
+                "**Yesterday's Charge stays yesterday's Charge.** A finished day's score kept moving \u2014 the same day could read 54 in the evening and 45 the next morning, off the very same heart-rate variability, resting heart rate, breathing rate and Rest. Four separate faults caused it, and all four are fixed.",
+                "**Each day is measured against your baseline as it stood BEFORE that night.** Previously a good night's sleep quietly pulled down the scores of the days before it, and Choop redid that every few minutes while your strap was syncing.",
+                "**Choop no longer changes its mind about which nights you have.** If you have ever pressed \"Make active\" on your band, your history is filed under two names, and only some calculations looked under both. And your baseline was only ever the last three weeks, so every midnight the oldest night fell out and every score shifted slightly. Both are fixed: the baseline is now built from every night Choop has ever measured.",
+                "**Your whole Charge history is rebuilt once, automatically.** Expect your past numbers to move one final time, then hold. Nothing is deleted and your baseline is not reset. Settings \u2192 Charge now shows when that rebuild last happened, and a button repeats it on demand.",
+                "**Badges tell the truth about the day you're looking at.** Push / Maintain / Rest showed today's verdict even on a past day, and the confidence badge claimed \"Solid\" for a day resting on four nights exactly like one resting on twenty.",
             ),
         ),
         Release(
