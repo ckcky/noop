@@ -260,15 +260,24 @@ jobs:
         run: |
           set -euo pipefail
           TITLE=""
+          PR_JSON=""
           # The OPEN PR whose head is this branch, if there is one. Restricted to --state open on
           # purpose: branch names get reused, and `gh pr view <branch>` happily resolves a long-MERGED
           # PR for the same name — which would stamp an old PR's title onto a brand-new release.
-          PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$REF_NAME" --state open \
-            --limit 1 --json title,body --jq '.[0] // empty' 2>/dev/null || echo '')
-          # A STABLE cut runs on main, where no PR has head=main — so the open-PR lookup above finds
-          # nothing and the notes would degrade to raw commit subjects. The release being cut is
-          # exactly the PR that was just merged, so read that one instead. (Most recently merged by
-          # mergedAt, not by creation order.)
+          #
+          # SKIPPED ENTIRELY on the default branch. A fork's default branch is ALSO called `main`, so on
+          # a stable cut `--head main` matches any open PR sent from a fork's main — someone else's
+          # unmerged work — and stamps its title onto our release. That is not hypothetical: v8.2.35 was
+          # published announcing a "Windows desktop client" that is not in the build, taken from an open
+          # fork PR, into both the release body and the compiled in-app changelog. On the default branch
+          # the only correct source is the PR that was just MERGED, resolved below.
+          if [ "$REF_NAME" != "${DEFAULT_BRANCH:-main}" ]; then
+            PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$REF_NAME" --state open \
+              --limit 1 --json title,body --jq '.[0] // empty' 2>/dev/null || echo '')
+          fi
+          # A STABLE cut runs on main: the release being cut is exactly the PR that was just merged, so
+          # read that one. (Most recently merged by mergedAt, not by creation order.) Restricted to PRs
+          # whose BASE is this repo's default branch, so a fork's internal PR can never be picked up.
           if [ -z "$PR_JSON" ] && [ "$REF_NAME" = "${DEFAULT_BRANCH:-main}" ]; then
             PR_JSON=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$REF_NAME" --state merged \
               --limit 20 --json title,body,mergedAt \
