@@ -376,6 +376,12 @@ final class AppModel: ObservableObject {
             // history once, so any deep-history rows an older build left on the 0–21 axis regenerate on
             // the 0–100 axis. Guarded by a persisted flag, so this is a no-op on every subsequent launch.
             await self.intelligence.runEffortRescoreIfNeeded()
+            // One-shot on-upgrade FULL-history Charge rescore: Charge is now scored against the baseline as
+            // it stood strictly BEFORE each night, so a day's score no longer moves when later nights land.
+            // A normal pass only covers the trailing 21 days, so this lifts the cap once to bring the WHOLE
+            // record onto the causal definition instead of leaving a seam at the window edge. Persisted
+            // flag → a no-op on every subsequent launch.
+            await self.intelligence.runCausalChargeRescoreIfNeeded()
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after

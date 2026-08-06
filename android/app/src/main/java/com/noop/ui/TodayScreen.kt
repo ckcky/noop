@@ -839,7 +839,9 @@ fun TodayScreen(
     // (Baselines.minNightsSeed valid nights). Show honest "calibrating, N of 4 nights" progress
     // instead of a bare "No Data" so a new BLE-only user knows scores are coming, not broken. (PR #85)
     val recoveryCalibration: Int? = if (selectedDayOffset == 0) {
-        recoveryCalibrationNights(days, displayMetric?.recovery != null)
+        // Strictly-prior, matching the engine's causal baseline: tonight is scored against the nights
+        // BEFORE it, so tonight itself must not be counted towards the seed it hasn't reached yet.
+        recoveryCalibrationNights(days, displayMetric?.recovery != null, beforeDay = selectedDayKey)
     } else {
         null
     }
@@ -2654,19 +2656,35 @@ private fun SynthesisHeroCard(
             // S4 (#205): the one-word readiness read kept on the hero now the full Readiness card folded
             // into the Charge-ring tap. Push / Maintain / Rest; hidden when there isn't enough history.
             // Tapping it opens the Charge breakdown, where the full Readiness card now lives.
-            val readinessLevel = remember(days) {
+            // Readiness for the DAY ON SCREEN, not for the wall-clock today. This anchored on
+            // logicalDayKeyNow(), so navigating to a past day still showed today's verdict — a Tuesday in
+            // July could read PUSH because this morning does. The engine already takes the anchor day;
+            // it was simply never given the selected one.
+            val readinessAnchor = readDay?.day ?: logicalDayKeyNow()
+            val readinessLevel = remember(days, readinessAnchor) {
                 if (days.isEmpty()) ReadinessEngine.Level.INSUFFICIENT
-                else ReadinessEngine.evaluate(days, today = logicalDayKeyNow()).level
+                else ReadinessEngine.evaluate(days, today = readinessAnchor).level
             }
             readinessWord(readinessLevel)?.let { word ->
                 ReadinessHeroPill(word = word, level = readinessLevel, onTap = onOpenReadiness)
             }
-            // SOLID only when TODAY's own row carries a settled recovery, a carried prior-day read is
-            // honestly still CALIBRATING for today, matching the iOS pill (keyed on displayDay.recovery).
-            val todayRecovery = day?.recovery
+            // The REAL three-state confidence for the day on screen. This was a bare "has a score / has
+            // none" test, so BUILDING could never appear and a day standing on a four-night baseline
+            // claimed SOLID exactly like one standing on twenty. [chargeConfidenceTier] reads the tier off
+            // the same strictly-prior HRV baseline the score itself used, so the pill and the number can
+            // no longer disagree.
+            val confidence = remember(days, readDay) { chargeConfidenceTier(days, readDay) }
             StatePill(
-                title = if (todayRecovery != null) "SOLID" else "CALIBRATING",
-                tone = if (todayRecovery != null) StrandTone.Accent else StrandTone.Neutral,
+                title = when (confidence) {
+                    ScoreConfidence.SOLID -> "SOLID"
+                    ScoreConfidence.BUILDING -> "BUILDING"
+                    ScoreConfidence.CALIBRATING -> "CALIBRATING"
+                },
+                tone = when (confidence) {
+                    ScoreConfidence.SOLID -> StrandTone.Accent
+                    ScoreConfidence.BUILDING -> StrandTone.Warning
+                    ScoreConfidence.CALIBRATING -> StrandTone.Neutral
+                },
             )
         }
         // S4: the Synthesis card collapses to a one-liner that expands on tap. The headline (the status) is
@@ -3785,15 +3803,21 @@ internal fun recoveryCalibrationNights(
     days: List<DailyMetric>,
     hasRecovery: Boolean,
     seed: Int = Baselines.minNightsSeed,
+    beforeDay: String? = null,
 ): Int? {
     if (hasRecovery) return null
+    // Count the nights the BASELINE actually sees for [beforeDay]: Charge is scored against the state as
+    // it stood strictly BEFORE that night, so the countdown has to exclude the night being scored too.
+    // Counting it made a 4th night read "not calibrating" while the engine still (correctly) refused to
+    // score it — the ring would fall through to a bare empty state on the very night the countdown ended.
+    val history = if (beforeDay != null) days.filter { it.day < beforeDay } else days
     // Match the baseline's validity predicate, not just non-null: Baselines.update only advances the
     // recovery seed (nValid) for nights whose avgHrv is within the HRV config bounds, so an implausible
     // out-of-range night must NOT be counted here either, else the displayed N could over-state nValid.
     val cfg = Baselines.hrvCfg
     // Include 0: a brand-new user (no banked nights) reads "Calibrating, 0 of N" on Charge, not a
     // bare "No data" that looks broken (#335). Caller gates past days to null; >= seed → null.
-    return days.count { val v = it.avgHrv; v != null && v in cfg.minVal..cfg.maxVal }
+    return history.count { val v = it.avgHrv; v != null && v in cfg.minVal..cfg.maxVal }
         .takeIf { it in 0 until seed }
 }
 
@@ -3815,8 +3839,11 @@ internal fun recoveryChargeDrivers(
     val hrv = day.avgHrv ?: return emptyList()
     val rhr = day.restingHr?.toDouble() ?: return emptyList()
 
-    // Whole-history fold (oldest first), exactly as the engine seeds baselines2.
-    val ordered = days.sortedBy { it.day }
+    // STRICTLY-PRIOR fold (oldest first), exactly as the engine's causal baselines: the displayed day is
+    // scored against who the person was BEFORE that night, so these rows reproduce the stored Charge. A
+    // whole-history fold (which is what this did before) folded the displayed night — and every night
+    // after it — into the baseline it was being measured against, so the sheet drifted away from the ring.
+    val ordered = days.sortedBy { it.day }.filter { it.day < day.day }
     val hrvBase = Baselines.foldHistory(ordered.map { it.avgHrv }, Baselines.hrvCfg)
     if (!hrvBase.usable) return emptyList()
     val rhrBase = Baselines.foldHistory(ordered.map { it.restingHr?.toDouble() }, Baselines.restingHRCfg)
@@ -3848,8 +3875,12 @@ internal fun chargeConfidenceTier(
     days: List<DailyMetric>,
     displayDay: DailyMetric?,
 ): ScoreConfidence {
-    val hrvBase: BaselineState =
-        Baselines.foldHistory(days.sortedBy { it.day }.map { it.avgHrv }, Baselines.hrvCfg)
+    // Strictly-prior, matching the engine's causal baseline (and [recoveryChargeDrivers] above): the tier
+    // must describe the baseline the score was actually computed against, not one that includes the night
+    // being scored. With no displayed day the whole history is the best available answer.
+    val ordered = days.sortedBy { it.day }
+        .let { all -> displayDay?.let { d -> all.filter { it.day < d.day } } ?: all }
+    val hrvBase: BaselineState = Baselines.foldHistory(ordered.map { it.avgHrv }, Baselines.hrvCfg)
     return ScoreConfidence.forCharge(displayDay?.recovery, hrvBase)
 }
 

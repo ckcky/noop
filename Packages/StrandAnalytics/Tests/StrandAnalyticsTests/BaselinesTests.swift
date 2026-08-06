@@ -277,4 +277,71 @@ final class BaselinesTests: XCTestCase {
         XCTAssertEqual(after.nValid, 0)
         XCTAssertEqual(after.status, .calibrating)
     }
+
+    // MARK: - Prefix fold (causal baselines) — Kotlin twin: BaselinesPrefixFoldTest
+
+    /// A history with a settling trend, a missing night, and an implausible reading (all three paths).
+    private static let prefixValues: [Double?] = [62, 58, 71, 55, nil, 60, 49, 66, 3, 57, 63, 52]
+    private static let prefixDayKeys: [String] = (1...12).map { String(format: "2026-07-%02d", $0) }
+
+    /// The contract: element `i` is the fold over every STRICTLY-EARLIER night and nothing else. Pinned
+    /// against the existing fold rather than hand-copied numbers, so the prefix path can never drift away
+    /// from the production model it replays.
+    func testPrefixElementEqualsFoldOverStrictlyEarlierNights() {
+        let values = Self.prefixValues
+        let prefix = Baselines.foldHistoryPrefix(values, cfg: Baselines.hrvCfg)
+        XCTAssertEqual(prefix.count, values.count)
+        for i in values.indices {
+            XCTAssertEqual(prefix[i], Baselines.foldHistory(Array(values.prefix(i)), cfg: Baselines.hrvCfg),
+                           "prefix[\(i)] must be the fold over the first \(i) nights")
+        }
+    }
+
+    /// No prior nights → not usable, so the caller refuses to score rather than measuring the first night
+    /// against itself. This is what keeps the cold start honest.
+    func testPrefixFirstElementIsTheEmptyCalibratingSeed() {
+        let prefix = Baselines.foldHistoryPrefix(Self.prefixValues, cfg: Baselines.hrvCfg)
+        XCTAssertEqual(prefix[0], Baselines.emptyState(cfg: Baselines.hrvCfg))
+        XCTAssertEqual(prefix[0].nValid, 0)
+        XCTAssertFalse(prefix[0].usable)
+    }
+
+    /// THE property the causal Charge fix rests on: what came before cannot be rewritten by what comes
+    /// after. Without it a finished day's Charge moves every time the engine re-runs.
+    func testAppendingANightNeverChangesAnEarlierElement() {
+        let values = Self.prefixValues
+        let short = Baselines.foldHistoryPrefix(values, cfg: Baselines.hrvCfg)
+        let long = Baselines.foldHistoryPrefix(values + [88.0], cfg: Baselines.hrvCfg)
+        for i in values.indices {
+            XCTAssertEqual(short[i], long[i], "appending a night must not touch prefix[\(i)]")
+        }
+    }
+
+    func testPrefixZeroEpochIsIdenticalToThePlainFold() {
+        XCTAssertEqual(
+            Baselines.foldHistoryPrefix(Self.prefixValues, dayKeys: Self.prefixDayKeys,
+                                        cfg: Baselines.hrvCfg, baselineEpoch: 0),
+            Baselines.foldHistoryPrefix(Self.prefixValues, cfg: Baselines.hrvCfg))
+    }
+
+    /// Recalibrating drops earlier nights (not skip-and-hold) while keeping the list parallel to the input.
+    func testPrefixHonoursTheRecalibrationEpoch() {
+        let values = Self.prefixValues
+        let days = Self.prefixDayKeys
+        var comps = DateComponents(); comps.year = 2026; comps.month = 7; comps.day = 8
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let epoch = cal.date(from: comps)!.timeIntervalSince1970
+
+        let prefix = Baselines.foldHistoryPrefix(values, dayKeys: days, cfg: Baselines.hrvCfg,
+                                                 baselineEpoch: epoch)
+        XCTAssertEqual(prefix.count, values.count)
+        // Index 7 is the 8th, the first on-or-after-epoch night, so nothing has been folded yet.
+        XCTAssertEqual(prefix[7], Baselines.emptyState(cfg: Baselines.hrvCfg))
+        for i in values.indices {
+            XCTAssertEqual(prefix[i],
+                           Baselines.foldHistory(Array(values.prefix(i)), dayKeys: Array(days.prefix(i)),
+                                                 cfg: Baselines.hrvCfg, baselineEpoch: epoch),
+                           "prefix[\(i)] must match the epoch-aware fold over the first \(i) nights")
+        }
+    }
 }

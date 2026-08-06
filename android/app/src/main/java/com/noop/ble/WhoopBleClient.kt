@@ -40,9 +40,11 @@ import com.noop.protocol.Reassembler
 import com.noop.protocol.Streams
 import com.noop.protocol.Whoop5Config
 import com.noop.protocol.extractStreams
+import com.noop.NoopApplication
 import com.noop.analytics.Baselines
 import com.noop.analytics.BatterySocLine
 import com.noop.analytics.IntelligenceEngine
+import com.noop.analytics.RegistryDayOwnerSource
 import com.noop.analytics.NapDetector
 import com.noop.analytics.NapPrefs
 import com.noop.analytics.NapVerdict
@@ -1254,6 +1256,17 @@ class WhoopBleClient(
                         profile = profile,
                         importedDeviceId = deviceId,
                         maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
+                        // I2 day-owner resolution, the SAME source the 15-min loop passes. Omitting it here
+                        // made this pass resolve every day to the ACTIVE strap id, so on an install whose
+                        // history splits across two lineages (a strap made active under its real id) every
+                        // pre-switch day read an empty stream, failed the MIN_HR_SAMPLES gate and was
+                        // silently dropped — not just unscored, but ABSENT from the baseline fold. This pass
+                        // then wrote Charge against a baseline of ~9 nights while the idle loop wrote it
+                        // against ~18, and the two rewrote each other's numbers every few minutes. Same
+                        // argument on every caller = same day set = same baseline = a stable score.
+                        ownerSource = RegistryDayOwnerSource(
+                            (context.applicationContext as NoopApplication).deviceRegistry,
+                        ),
                         // Steps-estimate calibration: honor the user's manual override and persist the fit
                         // after a backfill too, so the Settings/Steps screen reflects the latest data.
                         manualStepCoefficient = profileStore.stepsManualOverride,

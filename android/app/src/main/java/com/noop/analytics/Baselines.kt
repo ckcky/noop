@@ -292,6 +292,82 @@ object Baselines {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Prefix fold (causal baselines)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * The baseline state as it stood BEFORE each night, i.e. element `i` is the state after folding
+     * entries `0..<i` only. Same replay [update] runs — the returned element `i` is exactly what
+     * [foldHistory] over `values.take(i)` would produce — so this adds no new baseline maths, it only
+     * exposes the intermediate states the fold already walks through.
+     *
+     * WHY: Charge for a night must be scored against who the person was BEFORE that night. Folding the
+     * whole history into one terminal state and scoring every day against it makes a past day's score
+     * depend on nights that happened after it, so the score moved every time the engine re-ran (the
+     * ~15-minute rescore). With the per-night state the score is causal AND idempotent: re-scoring an
+     * already-scored day yields the identical number, so a repeat pass is a genuine no-op.
+     *
+     * Element 0 is the empty-history seed (nValid = 0, CALIBRATING), so the first nights are refused by
+     * the caller's `usable` gate rather than scored against themselves — the honest cold start.
+     *
+     * @param values ordered nightly values, oldest first; nulls are missing nights (skip-and-hold).
+     * @return a list the SAME length as [values].
+     */
+    fun foldHistoryPrefix(values: List<Double?>, cfg: MetricCfg): List<BaselineState> {
+        val out = ArrayList<BaselineState>(values.size)
+        var state: BaselineState? = null
+        for (v in values) {
+            out.add(state ?: emptyState(cfg))
+            state = update(state, v, cfg)
+        }
+        return out
+    }
+
+    /**
+     * [foldHistoryPrefix] honouring a manual recalibration [baselineEpoch] (epoch SECONDS; 0 = none),
+     * exactly as the day-keyed [foldHistory] overload does: a night whose day STARTS (UTC) before the
+     * epoch is DROPPED (not skip-and-hold), so the baseline re-seeds from the first on-or-after-epoch
+     * night. A dropped night still gets an entry in the returned list (the state carried at that point),
+     * so the result stays parallel to [values].
+     *
+     * With [baselineEpoch] <= 0 this is byte-identical to the plain [foldHistoryPrefix].
+     */
+    fun foldHistoryPrefix(
+        values: List<Double?>,
+        dayKeys: List<String>,
+        cfg: MetricCfg,
+        baselineEpoch: Double,
+    ): List<BaselineState> {
+        if (baselineEpoch <= 0.0) return foldHistoryPrefix(values, cfg)
+
+        val out = ArrayList<BaselineState>(values.size)
+        var state: BaselineState? = null
+        for (i in values.indices) {
+            out.add(state ?: emptyState(cfg))
+            if (i < dayKeys.size) {
+                val dayStart = runCatching {
+                    java.time.LocalDate.parse(dayKeys[i])
+                        .atStartOfDay(java.time.ZoneOffset.UTC).toEpochSecond().toDouble()
+                }.getOrNull()
+                if (dayStart != null && dayStart < baselineEpoch) continue
+            }
+            state = update(state, values[i], cfg)
+        }
+        return out
+    }
+
+    /** The no-history state both folds fall back to: centred on the config midpoint, spread at the
+     *  floor, nValid = 0 (so [BaselineState.usable] is false and no score is produced). Identical to
+     *  what [foldHistory] returns for an empty input. */
+    internal fun emptyState(cfg: MetricCfg): BaselineState = BaselineState(
+        baseline = (cfg.minVal + cfg.maxVal) / 2.0,
+        spread = cfg.floorSpread,
+        nValid = 0,
+        nightsSinceUpdate = 0,
+        status = BaselineStatus.CALIBRATING,
+    )
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Deviation
     // ─────────────────────────────────────────────────────────────────────────
 
