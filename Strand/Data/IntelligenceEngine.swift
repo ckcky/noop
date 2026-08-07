@@ -221,6 +221,31 @@ final class IntelligenceEngine: ObservableObject {
         if !computing { UserDefaults.standard.set(true, forKey: Self.effortRescoreFlagKey) }
     }
 
+    /// UserDefaults flag guarding the one-shot FULL-history causal-Charge rescore (below).
+    static let causalChargeRescoreFlagKey = "intelligence.causalChargeRescore.done"
+
+    /// FULL-history Charge rescore onto the causal baseline. Runs once automatically on upgrade, and again
+    /// whenever the user taps Settings → "Recalculate all Charge scores" (`force: true`).
+    ///
+    /// WHY IT IS NEEDED: a normal pass only ever scores the trailing `maxDays` (21). Charge is now computed
+    /// against the baseline as it stood strictly BEFORE each night, but only days inside that window get
+    /// re-derived, so without this the last three weeks would sit on the new causal algorithm while every
+    /// older day kept the value the old whole-history fold produced , a visible seam in Trends, Insights
+    /// and the Charge history. Lifting the `maxDays` cap re-scores every day with raw HR from the same raw
+    /// data, so the whole record lands on one definition.
+    ///
+    /// Only the computed ("-noop") source is rewritten, exactly like every other pass; imported rows are
+    /// never touched and no raw data is deleted. Re-running is harmless , with causal baselines a re-score
+    /// is idempotent, which is the whole point , so the Settings button can be tapped freely.
+    /// Mirrors the Android `IntelligenceEngine.runCausalChargeRescoreIfNeeded`.
+    func runCausalChargeRescoreIfNeeded(force: Bool = false, historyDays: Int = 4000) async {
+        guard force || !UserDefaults.standard.bool(forKey: Self.causalChargeRescoreFlagKey) else { return }
+        await analyzeRecent(maxDays: historyDays)
+        // Same completion check as the Effort rescore: only latch when the pass actually ran (a call
+        // skipped because another tick held the `computing` lock must retry on the next launch).
+        if !computing { UserDefaults.standard.set(true, forKey: Self.causalChargeRescoreFlagKey) }
+    }
+
     /// UserDefaults flag guarding the one-shot #547 implausible-timestamp DB heal (below). Set once the
     /// heal completes so it never re-runs.
     static let timestampHealFlagKey = "intelligence.timestampHeal.v547.done"
@@ -645,14 +670,28 @@ final class IntelligenceEngine: ObservableObject {
         var histHrvByDay: [String: Double?] = [:]
         var histRhrByDay: [String: Double?] = [:]
         var histRespByDay: [String: Double?] = [:]
+        // BASE LAYER: every night ever derived, read from the store over the WHOLE history. Without this
+        // a night was in the baseline only while it sat inside the pass's trailing scan window, so each
+        // midnight the oldest night dropped out, the fold re-anchored on a different first night, and
+        // every stored score shifted by about a point. `maxDays` must not decide what we measure against.
+        let computedHist = ((try? await store.dailyMetrics(deviceId: computedId,
+                                                           from: "0000-01-01", to: "9999-12-31")) ?? [])
+        for d in computedHist {
+            histHrvByDay[d.day] = d.avgHrv
+            histRhrByDay[d.day] = d.restingHr.map(Double.init)
+            histRespByDay[d.day] = d.respRateBpm
+        }
+        // Freshly derived values for the days THIS pass re-read: the same quantity as the base layer, one
+        // derivation newer, so they replace it for exactly those days.
+        for (day, v) in nightlyHrvByDay { histHrvByDay[day] = v }
+        for (day, v) in nightlyRhrByDay { histRhrByDay[day] = v }
+        for (day, v) in nightlyRespByDay { histRespByDay[day] = v }
+        // IMPORTED values win last, per day , the documented merge precedence, unchanged.
         for d in hist {
             histHrvByDay[d.day] = d.avgHrv
             histRhrByDay[d.day] = d.restingHr.map(Double.init)
             histRespByDay[d.day] = d.respRateBpm
         }
-        for (day, v) in nightlyHrvByDay where histHrvByDay[day] == nil { histHrvByDay[day] = v }
-        for (day, v) in nightlyRhrByDay where histRhrByDay[day] == nil { histRhrByDay[day] = v }
-        for (day, v) in nightlyRespByDay where histRespByDay[day] == nil { histRespByDay[day] = v }
         // rhr/resp/skin honour the Charge-wide recalibration epoch (noop.recoveryBaselineEpoch); 0 = no-op,
         // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
         // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
@@ -663,25 +702,46 @@ final class IntelligenceEngine: ObservableObject {
         let rhrSeq = rhrDayKeys.map { histRhrByDay[$0]! }
         let respDayKeys = histRespByDay.keys.sorted()
         let respSeq = respDayKeys.map { histRespByDay[$0]! }
-        // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
-        // so fold purely over the pass-1 nightly means in chronological order.
+        // KNOWN REMNANT (mirrors Android): skin temp still folds over THIS PASS's window only, because
+        // the daily row stores the deviation rather than the nightly mean and a deviation cannot be
+        // re-folded into the baseline it was measured against. Persisting the mean needs a schema column.
+        // wSkinTemp = 0.05 and the term drops unless its baseline is usable, so the residual window
+        // dependence here is roughly a twentieth of what HRV's was.
         let skinDayKeys = nightlySkinByDay.keys.sorted()
         let skinSeq = skinDayKeys.map { nightlySkinByDay[$0]! }
-        // Resp baseline gated on `usable`: RecoveryScorer includes the resp term whenever a
-        // baseline object is present , a CALIBRATING (<4-night) baseline would let one noisy
-        // RSA night move recovery (mirrors the skin-temp use-site gate; honest cold-start).
-        let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, cfg: respCfg, baselineEpoch: recoveryEpoch)
-        // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
-        // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
-        // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
-        let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, cfg: skinCfg, baselineEpoch: recoveryEpoch)
-        let baselines2 = AnalyticsEngine.ProfileBaselines(
-            // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via their
-            // parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
-            hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, cfg: hrvCfg),
-            restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, cfg: rhrCfg, baselineEpoch: recoveryEpoch),
-            resp: respFold.usable ? respFold : nil,
-            skinTemp: skinFold.usable ? skinFold : nil)
+        // ── CAUSAL baselines: each night is scored against who the person was BEFORE it ────────────────
+        // Previously all four drivers were folded into ONE terminal state and EVERY day in the window was
+        // scored against it. That made a finished day's Charge depend on nights that came AFTER it, so
+        // each of the many daily rescores rewrote the stored score with a slightly different number — a
+        // day could read 54 in the evening and 45 the next day off identical inputs. `foldHistoryPrefix`
+        // hands back the state as it stood before each night instead, which makes a day's score a pure
+        // function of its OWN night plus strictly-earlier ones: causal, and idempotent under re-running.
+        //
+        // Per-metric, over that metric's OWN sorted key list — deliberately NOT a unified key set. Padding
+        // a metric's absent days with nils would advance nightsSinceUpdate and could flip a baseline to
+        // .stale, which silently drops the term (BaselineState.usable excludes .stale).
+        //
+        // Resp/skin stay gated on `usable` (RecoveryScorer includes a term whenever a baseline object is
+        // present, and a CALIBRATING baseline would let one noisy night move recovery) — the gate now
+        // applies to the PRIOR state, per day.
+        let hrvPrior = PriorBaselines(keys: hrvDayKeys, values: hrvSeq, cfg: hrvCfg)
+        let rhrPrior = PriorBaselines(keys: rhrDayKeys, values: rhrSeq, cfg: rhrCfg,
+                                      baselineEpoch: recoveryEpoch)
+        let respPrior = PriorBaselines(keys: respDayKeys, values: respSeq, cfg: respCfg,
+                                       baselineEpoch: recoveryEpoch)
+        let skinPrior = PriorBaselines(keys: skinDayKeys, values: skinSeq, cfg: skinCfg,
+                                       baselineEpoch: recoveryEpoch)
+
+        /// The four Charge baselines as they stood strictly BEFORE `day`.
+        func baselinesBefore(_ day: String) -> AnalyticsEngine.ProfileBaselines {
+            let respBase = respPrior.before(day)
+            let skinBase = skinPrior.before(day)
+            return AnalyticsEngine.ProfileBaselines(
+                hrv: hrvPrior.before(day),
+                restingHR: rhrPrior.before(day),
+                resp: respBase.usable ? respBase : nil,
+                skinTemp: skinBase.usable ? skinBase : nil)
+        }
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
         // user who BOTH has real sessions AND wears the strap doesn't see the same session twice (the
@@ -754,25 +814,31 @@ final class IntelligenceEngine: ObservableObject {
         for night in scoredNights {
             let daily = sleepEditedDaily(night.daily, detected: night.cachedSleep, editsByStart: editsByStart,
                                          habitualMidsleepSec: habitualMidsleepSec)
-            let recovery = recomputeRecovery(daily, baselines2)
+            // The baselines as they stood BEFORE this night — the same state every later pass will
+            // resolve for this day, which is what makes the re-score idempotent.
+            let priorBaselines = baselinesBefore(daily.day)
+            let recovery = recomputeRecovery(daily, priorBaselines)
             // Charge term-breakdown trace (Group G): only when the Recovery test mode is on. Emits which
             // term moved Charge and which was nil and forced the renorm, tagged `.recovery`. The trace's
             // score is RecoveryScorer.recovery verbatim, so the `recovery` written above is unchanged.
             if recoveryTraceActive {
-                for line in recoveryTraceLines(daily, baselines2) { diagnosticSink?(line, .recovery) }
+                for line in recoveryTraceLines(daily, priorBaselines) { diagnosticSink?(line, .recovery) }
             }
-            let skinDev = recomputeSkinTempDev(night.nightlySkin, baselines2.skinTemp)
+            // The skin-temp DEVIATION is scored against the prior baseline too. Leaving it on a terminal
+            // fold would keep feeding a moving value back into Charge through the wSkinTemp term, so the
+            // day would still drift even with a causal HRV/RHR baseline.
+            let skinDev = recomputeSkinTempDev(night.nightlySkin, priorBaselines.skinTemp)
             let source = DaySource.classify(day: daily.day, importedWhoopDays: importedWhoopDays,
                                             appleHealthDays: appleHealthDays)
             // SHARED CONTRACT enrichment: the ordered Charge driver list + the relative skin-temp marker,
             // built from the SAME inputs `recomputeRecovery` reads so the rows can never disagree with the
             // headline. Both are empty/nil pre-baseline (cold-start), matching the score's own null-honesty.
-            let drivers = recomputeChargeDrivers(daily, baselines2)
+            let drivers = recomputeChargeDrivers(daily, priorBaselines)
             let skinRel = RecoveryScorer.skinTempRelative(deviationC: skinDev)
             // Honest per-day Charge confidence (A3): the strap night reads `.solid`/`.building`/`.calibrating`
             // off the HRV baseline state rather than a blanket `.solid`, so a thin/provisional baseline shows
             // EST. not REL. Pure presentation upstream of the UI; the score itself is unchanged.
-            let chargeConf = ScoreConfidence.charge(recovery: recovery, hrvBaseline: baselines2.hrv)
+            let chargeConf = ScoreConfidence.charge(recovery: recovery, hrvBaseline: priorBaselines.hrv)
             out.append(Computed(day: daily.day, recovery: recovery, strain: night.strain,
                                 sleepMin: daily.totalSleepMin, hrv: daily.avgHrv,
                                 rhr: daily.restingHr, source: source, confidence: chargeConf,
@@ -1338,6 +1404,45 @@ final class IntelligenceEngine: ObservableObject {
                 strain: s.strain, distanceM: row.distanceM, zonesJSON: row.zonesJSON, notes: row.notes))
         }
         if !updated.isEmpty { _ = try? await store.upsertWorkouts(updated, deviceId: deviceId) }
+    }
+
+    /// One metric's baseline history, queryable as "the state strictly BEFORE day X".
+    ///
+    /// Built once per run from `Baselines.foldHistoryPrefix` over that metric's own chronologically sorted
+    /// nightly values, so the whole per-day lookup costs ONE fold plus a binary search per day — the same
+    /// O(n) the single terminal fold used to cost.
+    ///
+    /// `keys` are "yyyy-MM-dd" ascending; `states[i]` is the baseline after folding `keys[0..<i]`, i.e.
+    /// everything strictly before `keys[i]`. `terminal` is the fold over ALL entries, used for a day that
+    /// sorts after every key. In practice every scored day is itself a key (pass 1 records one entry per
+    /// scanned day, including a nil for a night with no value), so `terminal` is a defensive fallback.
+    /// Mirrors the Android `IntelligenceEngine.PriorBaselines`.
+    private struct PriorBaselines {
+        private let keys: [String]
+        private let cfg: MetricCfg
+        private let states: [BaselineState]
+        private let terminal: BaselineState
+
+        init(keys: [String], values: [Double?], cfg: MetricCfg, baselineEpoch: Double? = nil) {
+            self.keys = keys
+            self.cfg = cfg
+            self.states = Baselines.foldHistoryPrefix(values, dayKeys: keys, cfg: cfg,
+                                                      baselineEpoch: baselineEpoch)
+            self.terminal = Baselines.foldHistory(values, dayKeys: keys, cfg: cfg,
+                                                  baselineEpoch: baselineEpoch)
+        }
+
+        /// The baseline as it stood before `day`: the prefix state at the first key >= `day`.
+        func before(_ day: String) -> BaselineState {
+            guard !keys.isEmpty else { return Baselines.emptyState(cfg: cfg) }
+            // First index whose key is >= day (binary search for the lower bound).
+            var lo = 0, hi = keys.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if keys[mid] < day { lo = mid + 1 } else { hi = mid }
+            }
+            return lo < states.count ? states[lo] : terminal
+        }
     }
 
     /// Re-score ONLY the recovery composite for a day against a (re-seeded) baseline. Every other field

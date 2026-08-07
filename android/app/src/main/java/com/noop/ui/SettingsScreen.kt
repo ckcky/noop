@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Sensors
@@ -94,6 +95,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
 import com.noop.analytics.Baselines
+import com.noop.analytics.IntelligenceEngine
 import com.noop.analytics.Zones
 import com.noop.ble.PuffinExperiment
 import com.noop.ble.WhoopModel
@@ -358,6 +360,9 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
     // that feeds Charge from tonight onward; the standing analyze loop picks it up on its next pass.
     // Fixes a baseline poisoned by a bad first week (worn sick, or early nights that anchored too high).
     var showRecalibrateConfirm by remember { mutableStateOf(false) }
+    // True while the full-history Charge rescore is running, so the button disables + reads "Recalculating…"
+    // instead of letting an impatient second tap queue another multi-minute pass.
+    var recalculatingCharge by remember { mutableStateOf(false) }
 
     // Whether the "Advanced" disclosure (experimental probes, diagnostics, raw-sensor export, Trends
     // report) is expanded. Default FALSE so a first-run user lands on the everyday sections instead of
@@ -1328,6 +1333,49 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     fullWidth = true,
                     modifier = Modifier.semantics { contentDescription = "Recalibrate Charge baseline" },
                     onClick = { showRecalibrateConfirm = true },
+                )
+                // Rebuild the WHOLE Charge history on the current algorithm. Distinct from Recalibrate
+                // above: this does NOT move the baseline anchor or restart the build-up — it re-scores
+                // every day you have raw data for against the baseline as it stood before that night. A
+                // normal pass only covers the trailing 21 days, so this is the only way older days pick up
+                // a scoring change. Runs once automatically after an upgrade; this button re-runs it.
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Recalculate all Charge scores", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        "Rebuilds every day's Charge from your stored data, so your whole history uses the current scoring. Nothing is deleted and your baseline is not reset. Takes a minute or two in the background.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                    // "Did it actually run?" answerable in the app. Without this the only way to tell was
+                    // to guess from how long ago the update was installed.
+                    Text(
+                        chargeRescoreStatusLine(context, recalculatingCharge),
+                        style = NoopType.footnote,
+                        color = Palette.textSecondary,
+                    )
+                }
+                NoopButton(
+                    text = if (recalculatingCharge) "Recalculating…" else "Recalculate all Charge scores",
+                    leadingIcon = Icons.Filled.Restore,
+                    kind = NoopButtonKind.Secondary,
+                    fullWidth = true,
+                    enabled = !recalculatingCharge,
+                    modifier = Modifier.semantics { contentDescription = "Recalculate all Charge scores" },
+                    onClick = {
+                        recalculatingCharge = true
+                        vm.recalculateAllCharge { ok ->
+                            recalculatingCharge = false
+                            Toast.makeText(
+                                context,
+                                if (ok) {
+                                    "Charge recalculated across your history."
+                                } else {
+                                    "Couldn't finish recalculating. Choop will catch up on its own."
+                                },
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    },
                 )
             }
         }
@@ -2740,4 +2788,32 @@ private fun AttributionRow(repo: String, note: String) {
         Text(repo, style = NoopType.mono(12f), color = Palette.textPrimary)
         Text("· $note", style = NoopType.footnote, color = Palette.textTertiary)
     }
+}
+
+/**
+ * One line under "Recalculate all Charge scores" saying whether the stored history has actually been
+ * scored with the CURRENT algorithm, and when.
+ *
+ * WHY: the full-history rescore runs in the background with no visible trace, so "did it happen?" was
+ * only answerable by guessing from how long ago the update was installed. Worse, the first version
+ * latched on a boolean, so a later scoring fix silently skipped it and left old days on a superseded
+ * algorithm with nothing on screen to say so. This states the fact, including the case where a rescore
+ * is still OWED.
+ *
+ * Pure read of two prefs; no work, safe to call on every recomposition.
+ */
+private fun chargeRescoreStatusLine(context: android.content.Context, running: Boolean): String {
+    if (running) return "Recalculating your history now…"
+    val done = NoopPrefs.chargeRescoreCompletedVersion(context)
+    val at = NoopPrefs.chargeRescoreCompletedAt(context)
+    if (done < IntelligenceEngine.SCORING_VERSION) {
+        // Either never run, or run at an older scoring version — both mean older days may still carry
+        // numbers the current algorithm would not produce.
+        return "Your history has not been rebuilt for the current scoring yet."
+    }
+    if (at <= 0L) return "Your history is up to date with the current scoring."
+    val stamp = java.time.Instant.ofEpochSecond(at)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofPattern("d MMM, HH:mm", java.util.Locale.getDefault()))
+    return "Last rebuilt $stamp — up to date with the current scoring."
 }

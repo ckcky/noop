@@ -712,6 +712,39 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_EFFORT_RESCORE_DONE, true).apply()
     }
 
+    /**
+     * The [com.noop.analytics.IntelligenceEngine.SCORING_VERSION] the last COMPLETED full-history Charge
+     * rescore ran at (0 = never). A normal pass only re-scores the trailing window, so without this the
+     * recent days would sit on the current definition while everything older kept values from a
+     * superseded one.
+     *
+     * This replaces a plain boolean latch, which had exactly that failure: it fired once, on the build
+     * that introduced it, and every later scoring fix found it already set and skipped. Comparing a
+     * monotone version instead means a bump always triggers one more pass, and never more than one.
+     */
+    const val KEY_CHARGE_RESCORE_VERSION = "noop.chargeRescore.completedVersion"
+
+    /** When that rescore completed (epoch SECONDS, 0 = never). Surfaced in Settings so "did it actually
+     *  run?" is answerable from the app instead of inferred from how long ago the update was. */
+    const val KEY_CHARGE_RESCORE_AT = "noop.chargeRescore.completedAt"
+
+    fun chargeRescoreCompletedVersion(context: Context): Int =
+        of(context).getInt(KEY_CHARGE_RESCORE_VERSION, 0)
+
+    fun chargeRescoreCompletedAt(context: Context): Long =
+        of(context).getLong(KEY_CHARGE_RESCORE_AT, 0L)
+
+    /** True when the stored history has already been scored at [version] or later. */
+    fun chargeRescoreUpToDate(context: Context, version: Int): Boolean =
+        chargeRescoreCompletedVersion(context) >= version
+
+    fun setChargeRescoreCompleted(context: Context, version: Int, atSeconds: Long) {
+        of(context).edit()
+            .putInt(KEY_CHARGE_RESCORE_VERSION, version)
+            .putLong(KEY_CHARGE_RESCORE_AT, atSeconds)
+            .apply()
+    }
+
     /** Whether the one-shot IDENTITY-FUSION heal has run. An install that pressed "Make active" on a
      *  strap's REAL id before this build scored its pre-switch days against an empty active-id stream, so
      *  those days are banked thin (or missing) under the old lineage. The heal clears

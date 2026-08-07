@@ -705,6 +705,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
                     flagGet = { NoopPrefs.effortRescoreDone(appContext) },
                     flagSet = { NoopPrefs.setEffortRescoreDone(appContext) },
+                    // Same day-owner resolution as every other pass, so a two-lineage install scores the
+                    // same day set here as in the loop below.
+                    ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
+                )
+            }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
+            // One-shot on-upgrade FULL-history Charge rescore: Charge is now scored against the baseline as
+            // it stood strictly BEFORE each night, so a day's score no longer moves when later nights land.
+            // A normal pass only covers the trailing 21 days, so this lifts the cap once to bring the WHOLE
+            // record onto the causal definition instead of leaving a seam at the window edge. Latched by a
+            // persisted flag; Settings → "Recalculate all Charge scores" re-runs it on demand.
+            runCatching {
+                IntelligenceEngine.runCausalChargeRescoreIfNeeded(
+                    repo = repository,
+                    profile = currentProfile(),
+                    importedDeviceId = deviceId,
+                    maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
+                    // Versioned, not a boolean latch: a scoring change bumps SCORING_VERSION, so the
+                    // stored history is brought onto the new definition exactly once per version. The old
+                    // boolean fired on the build that introduced it and then swallowed every later fix.
+                    flagGet = {
+                        NoopPrefs.chargeRescoreUpToDate(appContext, IntelligenceEngine.SCORING_VERSION)
+                    },
+                    flagSet = {
+                        NoopPrefs.setChargeRescoreCompleted(
+                            appContext, IntelligenceEngine.SCORING_VERSION,
+                            System.currentTimeMillis() / 1000L,
+                        )
+                    },
+                    ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
+                    baselineEpoch = NoopPrefs.of(appContext)
+                        .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
+                    recoveryEpoch = NoopPrefs.of(appContext)
+                        .getLong(Baselines.recoveryBaselineEpochKey, 0L).toDouble(),
                 )
             }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
             // IDENTITY FUSION one-shot heal: an install that pressed "Make active" on a strap's REAL id
@@ -1283,6 +1316,51 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 useExperimentalSleepV2 = PuffinExperiment.from(appContext).experimentalSleepV2,
             )
         }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
+    }
+
+    /**
+     * Re-score Charge across the user's WHOLE history against the causal (strictly-prior) baseline, then
+     * reload. Backs the Settings → "Recalculate all Charge scores" button.
+     *
+     * A normal pass only covers the trailing 21 days, so this is the one way to bring days older than that
+     * onto the current definition — after an upgrade that changed how Charge is computed, or any time the
+     * user wants the record rebuilt. It rewrites only the computed ("-noop") rows from the same raw HR;
+     * imported values are never touched, and no raw data is deleted. Safe to run repeatedly: with causal
+     * baselines a re-score is idempotent, so a second run reproduces the same numbers.
+     *
+     * [onDone] fires when the pass has finished, so the caller can drop its progress indicator. The
+     * dashboard needs no explicit reload: [recentDays] is a reactive merge over the store, so the
+     * re-scored rows republish themselves on upsert. Best-effort — a failure leaves the standing 15-min
+     * loop to catch up.
+     */
+    fun recalculateAllCharge(onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val ok = runCatching {
+                IntelligenceEngine.runCausalChargeRescoreIfNeeded(
+                    repo = repository,
+                    profile = currentProfile(),
+                    importedDeviceId = deviceId,
+                    maxHROverride = profileStore.hrMaxOverride.takeIf { it > 0 }?.toDouble(),
+                    flagGet = {
+                        NoopPrefs.chargeRescoreUpToDate(appContext, IntelligenceEngine.SCORING_VERSION)
+                    },
+                    flagSet = {
+                        NoopPrefs.setChargeRescoreCompleted(
+                            appContext, IntelligenceEngine.SCORING_VERSION,
+                            System.currentTimeMillis() / 1000L,
+                        )
+                    },
+                    force = true,
+                    ownerSource = RegistryDayOwnerSource(noopApp.deviceRegistry),
+                    baselineEpoch = NoopPrefs.of(appContext)
+                        .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
+                    recoveryEpoch = NoopPrefs.of(appContext)
+                        .getLong(Baselines.recoveryBaselineEpochKey, 0L).toDouble(),
+                )
+            }.onFailure { if (it is kotlin.coroutines.cancellation.CancellationException) throw it }
+                .isSuccess
+            onDone(ok)
+        }
     }
 
     /** Re-read every source + the dismissed markers and republish [workouts]. */
